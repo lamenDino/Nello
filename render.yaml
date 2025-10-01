@@ -1,0 +1,18 @@
+# File per il deployment automatico su Render.com
+services:
+  - type: web
+    name: tiktok-telegram-bot
+    env: python
+    region: frankfurt  # Più vicino all'Italia
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # Dovrai impostarlo manualmente su Render
+      - key: ADMIN_USER_ID  
+        sync: false  # Dovrai impostarlo manualmente su Render
+      - key: LOG_LEVEL
+        value: INFO
+      - key: TEMP_DIR
+        value: /tmp
