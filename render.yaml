@@ -1,15 +1,10 @@
 services:
   - type: web
     name: tiktok-telegram-bot
-    env: python
+    env: docker
     region: frankfurt
     plan: free
-    buildCommand: |
-      pip install --upgrade pip
-      pip uninstall -y python-telegram-bot
-      pip install --no-cache-dir python-telegram-bot==20.8
-      pip install --no-cache-dir -r requirements.txt
-    startCommand: python bot.py
+    dockerfilePath: Dockerfile
     envVars:
       - key: TELEGRAM_BOT_TOKEN
       - key: ADMIN_USER_ID
