@@ -8,6 +8,7 @@ Descrizione: Bot che scarica video TikTok senza watermark per il gruppo di amici
 import os
 import logging
 import asyncio
+from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -71,13 +72,10 @@ class TikTokBot:
         user = update.effective_user
         text = message.text.strip()
 
-        # Log testo originale
         logger.info(f"Raw text: {text}")
 
-        # Pulisci query string o URL accorciati
         clean_text = self.downloader.clean_tiktok_url(text)
 
-        # Log testo pulito
         logger.info(f"Clean text: {clean_text}")
 
         if not self.is_tiktok_link(clean_text):
@@ -87,7 +85,6 @@ class TikTokBot:
             )
             return
 
-        # Cancella messaggio originale
         try:
             await message.delete()
         except:
@@ -106,7 +103,7 @@ class TikTokBot:
                     f"🔗 Link originale: {clean_text}\n\n"
                     f"📝 {info.get('title','')[:100]}"
                 )
-                with open(info['file_path'],'rb') as f:
+                with open(info['file_path'], 'rb') as f:
                     await context.bot.send_video(
                         chat_id=message.chat_id,
                         video=f,
@@ -163,8 +160,28 @@ class TikTokBot:
         app.add_handler(CallbackQueryHandler(self.button_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_tiktok_link))
         app.add_error_handler(self.error_handler)
+
         logger.info("🚀 Avvio bot...")
+
+        loop = asyncio.get_event_loop()
+        # Avvia il server web in parallelo
+        loop.create_task(start_webserver())
+        # Avvia il bot (blocking call)
         app.run_polling(drop_pending_updates=True)
 
+
+async def handle(request):
+    return web.Response(text="OK")
+
+async def start_webserver():
+    app = web.Application()
+    app.add_routes([web.get('/', handle)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logging.info("Web server started on port 8080")
+
 if __name__ == "__main__":
-    TikTokBot().run()
+    bot = TikTokBot()
+    bot.run()
