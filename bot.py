@@ -71,8 +71,14 @@ class TikTokBot:
         user = update.effective_user
         text = message.text.strip()
 
+        # Log testo originale
+        logger.info(f"Raw text: {text}")
+
         # Pulisci query string o URL accorciati
         clean_text = self.downloader.clean_tiktok_url(text)
+
+        # Log testo pulito
+        logger.info(f"Clean text: {clean_text}")
 
         if not self.is_tiktok_link(clean_text):
             await message.reply_text(
