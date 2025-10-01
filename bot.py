@@ -164,23 +164,24 @@ class TikTokBot:
         logger.info("🚀 Avvio bot...")
 
         loop = asyncio.get_event_loop()
-        # Avvia il server web in parallelo
         loop.create_task(start_webserver())
-        # Avvia il bot (blocking call)
         app.run_polling(drop_pending_updates=True)
 
 
 async def handle(request):
     return web.Response(text="OK")
 
+
 async def start_webserver():
+    port = int(os.getenv('PORT', '8080'))
     app = web.Application()
     app.add_routes([web.get('/', handle)])
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logging.info("Web server started on port 8080")
+    logging.info(f"Web server started on port {port}")
+
 
 if __name__ == "__main__":
     bot = TikTokBot()
