@@ -3,15 +3,16 @@ services:
   - type: web
     name: tiktok-telegram-bot
     env: python
-    region: frankfurt  # Più vicino all'Italia
+    region: frankfurt
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install --upgrade pip
+      pip install python-telegram-bot==20.8
+      pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false  # Dovrai impostarlo manualmente su Render
-      - key: ADMIN_USER_ID  
-        sync: false  # Dovrai impostarlo manualmente su Render
+      - key: ADMIN_USER_ID
       - key: LOG_LEVEL
         value: INFO
       - key: TEMP_DIR
