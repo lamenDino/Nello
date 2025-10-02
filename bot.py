@@ -9,7 +9,8 @@ import logging
 import threading
 import asyncio
 from aiohttp import web
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 from tiktok_downloader import TikTokDownloader
@@ -88,18 +89,15 @@ async def run_web():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     logger.info(f"Web server started on port {PORT}")
-    # Keep running
     await asyncio.Event().wait()
 
 def start_webserver():
     asyncio.run(run_web())
 
 def main():
-    # Avvia webserver in background
     thread = threading.Thread(target=start_webserver, daemon=True)
     thread.start()
 
-    # Avvia bot
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler('start', start_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
