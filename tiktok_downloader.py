@@ -2,38 +2,17 @@ import os
 import asyncio
 import logging
 import tempfile
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 import yt_dlp
 import requests
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
-
-def insta_get_image_fallback(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        og_img = soup.find('meta', property='og:image')
-        if og_img and og_img.get('content'):
-            img_url = og_img['content']
-            img_file = os.path.join(tempfile.gettempdir(), "insta_fallback.jpg")
-            img_resp = requests.get(img_url, headers=headers)
-            with open(img_file, "wb") as f:
-                f.write(img_resp.content)
-            return img_file
-    except Exception as e:
-        logger.error(f"Instagram fallback scraping error: {e}")
-        pass
-    return None
 
 class TikTokDownloader:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
         self.ydl_opts = {
-            'format': 'bestvideo+bestaudio/best/bestimage',
+            'format': 'best[ext=mp4]/best',
             'outtmpl': os.path.join(self.temp_dir, '%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
@@ -46,46 +25,23 @@ class TikTokDownloader:
         try:
             clean_url = self.clean_tiktok_url(url)
             info = await self.extract_video_info(clean_url)
-            files = []
-
-            loop = asyncio.get_event_loop()
-            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                try:
-                    await loop.run_in_executor(None, ydl.download, [clean_url])
-                    if info and 'entries' in info and info['entries']:
-                        for entry in info['entries']:
-                            filename = ydl.prepare_filename(entry)
-                            if os.path.exists(filename):
-                                files.append(filename)
-                    elif info and 'url' in info and info.get('ext'):
-                        filename = ydl.prepare_filename(info)
-                        if os.path.exists(filename):
-                            files.append(filename)
-                except Exception as e:
-                    logger.warning(f"yt-dlp non ha trovato nè video nè immagini: {e}")
-                    if "instagram.com" in clean_url:
-                        img_file = insta_get_image_fallback(clean_url)
-                        if img_file and os.path.exists(img_file):
-                            files.append(img_file)
-                            return {
-                                'success': True,
-                                'files': files,
-                                'title': "Immagine Instagram (fallback)",
-                                'uploader': 'Instagram Fallback',
-                                'url': clean_url
-                            }
-
-            return {
-                'success': True if files else False,
-                'files': files,
-                'title': info.get('title', 'Post Instagram') if info else 'Instagram',
-                'uploader': info.get('uploader', 'Sconosciuto') if info else 'Instagram',
-                'url': clean_url
-            }
+            if not info:
+                return {'success': False, 'error': 'Impossibile ottenere informazioni sul video'}
+            file_path = await self.download_with_ytdlp(clean_url)
+            if file_path and os.path.exists(file_path):
+                return {
+                    'success': True,
+                    'file_path': file_path,
+                    'title': info.get('title', 'Video TikTok'),
+                    'uploader': info.get('uploader', 'Sconosciuto'),
+                    'duration': info.get('duration', 0),
+                    'url': clean_url
+                }
+            else:
+                return {'success': False, 'error': 'Download fallito'}
         except Exception as e:
-            logger.error(f"Errore download Instagram fallback per {url}: {str(e)}")
-            pass
-        return {'success': False, 'error': str(e)}
+            logger.error(f"Errore nel download di {url}: {str(e)}")
+            return {'success': False, 'error': str(e)}
 
     async def extract_video_info(self, url: str) -> Optional[Dict]:
         try:
@@ -96,8 +52,26 @@ class TikTokDownloader:
             return info
         except Exception as e:
             logger.error(f"Errore nell'estrazione info per {url}: {str(e)}")
-            pass
-        return None
+            return None
+
+    async def download_with_ytdlp(self, url: str) -> Optional[str]:
+        try:
+            loop = asyncio.get_event_loop()
+            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                await loop.run_in_executor(None, ydl.download, [url])
+                info = await loop.run_in_executor(None, ydl.extract_info, url)
+                filename = ydl.prepare_filename(info)
+                if os.path.exists(filename):
+                    return filename
+                base = os.path.splitext(filename)[0]
+                for ext in ['.mp4', '.webm', '.mkv']:
+                    test_file = base + ext
+                    if os.path.exists(test_file):
+                        return test_file
+                return None
+        except Exception as e:
+            logger.error(f"Errore yt-dlp per {url}: {str(e)}")
+            return None
 
     def clean_tiktok_url(self, url: str) -> str:
         url = url.strip()

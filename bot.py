@@ -18,15 +18,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 def is_supported_link(url: str) -> bool:
-    domains = [
-        'tiktok.com','vm.tiktok.com','vt.tiktok.com','m.tiktok.com',
-        'instagram.com','ig.tv','facebook.com','fb.watch','fb.com'
-    ]
+    domains = ['tiktok.com','vm.tiktok.com','vt.tiktok.com','m.tiktok.com','instagram.com','ig.tv','facebook.com','fb.watch','fb.com']
     return any(d in url for d in domains)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await update.message.reply_text(f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook per ricevere il video o le immagini.")
+    await update.message.reply_text(f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook per ricevere il video.")
 
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -39,49 +36,37 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await dl.download_video(url)
         if info['success']:
+            # Cancella solo se download OK
             try: await msg.delete()
             except: pass
 
-            source = ('TikTok' if 'tiktok' in url else
-                      'Instagram' if 'instagram' in url else
-                      'Facebook')
+            source = ('TikTok' if 'tiktok' in url else 'Instagram' if 'instagram' in url else 'Facebook')
             user_sender = escape(msg.from_user.full_name)
-            title = escape(info.get('title') or "Post scaricato da bot multi-social!")
+            title = escape(info.get('title') or "Video scaricato da bot multi-social!")
             orig_link = escape(url)
             caption = (
-                f"Post da: {source}\n"
-                f"Inviato da: {user_sender}\n"
+                f"Video da: {source}\n"
+                f"Video inviato da: {user_sender}\n"
                 f"Link originale: {orig_link}\n"
                 f"{title}"
             )
-
-            sent_first = False
-            for file_path in info["files"]:
-                with open(file_path, 'rb') as f:
-                    if file_path.endswith(('.jpg','.jpeg','.png','.webp')):
-                        await context.bot.send_photo(
-                            chat_id=msg.chat_id,
-                            photo=f,
-                            caption=caption if not sent_first else None,
-                            parse_mode=ParseMode.HTML
-                        )
-                    else:
-                        await context.bot.send_video(
-                            chat_id=msg.chat_id,
-                            video=f,
-                            caption=caption if not sent_first else None,
-                            parse_mode=ParseMode.HTML
-                        )
-                os.remove(file_path)
-                sent_first = True
+            with open(info['file_path'], 'rb') as f:
+                await context.bot.send_video(
+                    chat_id=msg.chat_id,
+                    video=f,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
             await loading.delete()
+            os.remove(info['file_path'])
         else:
+            # NON cancella il messaggio originale
             await loading.edit_text(
-                "❌ Errore: il contenuto non può essere scaricato. Il link rimane qui."
+                "❌ Errore: il video non può essere scaricato (Instagram/Facebook). Il link rimane qui in chat."
             )
     except Exception as e:
         logger.error(f"Download error: {e}")
-        txt = "❌ Errore durante il download del contenuto."
+        txt = "❌ Errore durante il download del video."
         await loading.edit_text(txt)
 
 async def health(request):
