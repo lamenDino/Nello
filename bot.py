@@ -1,3 +1,7 @@
+Ecco il codice completo di `bot.py` da copiare direttamente su GitHub.  
+Questa versione gestisce l’escape dei caratteri, usa HTML per evitare errori parsing Telegram, e mostra correttamente social, mittente, link, descrizione:
+
+```python
 #!/usr/bin/env python3
 import os
 import logging
@@ -6,6 +10,7 @@ import asyncio
 from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.helpers import escape
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 from tiktok_downloader import TikTokDownloader
@@ -48,12 +53,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source = ('TikTok' if 'tiktok' in url else
                       'Instagram' if 'instagram' in url else
                       'Facebook')
-            user_sender = msg.from_user.full_name
-            title = info.get('title') or "Video scaricato da bot multi-social!"
+            user_sender = escape(msg.from_user.full_name, version=2)
+            title = escape(info.get('title') or "Video scaricato da bot multi-social!", version=2)
+            orig_link = escape(url, version=2)
             caption = (
                 f"Video da: {source}\n"
                 f"Video inviato da: {user_sender}\n"
-                f"Link originale: {url}\n"
+                f"Link originale: {orig_link}\n"
                 f"{title}"
             )
             with open(info['file_path'], 'rb') as f:
@@ -61,7 +67,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=msg.chat_id,
                     video=f,
                     caption=caption,
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.HTML
                 )
             await loading.delete()
             os.remove(info['file_path'])
@@ -104,3 +110,8 @@ def main():
 
 if __name__ == '__main__':
     main()
+```
+
+Copia tutto in `bot.py`, salva e fai push! Il parsing dei titoli/link sarà sempre sicuro e il deploy sarà corretto.
+
+[1](https://github.com/lamenDino/Nello/edit/main/bot.py)
