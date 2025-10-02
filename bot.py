@@ -14,41 +14,33 @@ from tiktok_downloader import TikTokDownloader
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 PORT = int(os.getenv('PORT', '8080'))
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def is_supported_link(url: str) -> bool:
-    domains = [
-        'tiktok.com','vm.tiktok.com','vt.tiktok.com','m.tiktok.com',
-        'instagram.com','ig.tv','facebook.com','fb.watch','fb.com'
-    ]
+    domains = ['tiktok.com','vm.tiktok.com','vt.tiktok.com','m.tiktok.com','instagram.com','ig.tv','facebook.com','fb.watch','fb.com']
     return any(d in url for d in domains)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await update.message.reply_text(
-        f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook per ricevere il video."
-    )
+    await update.message.reply_text(f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook per ricevere il video.")
 
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     url = msg.text.strip()
     if not is_supported_link(url):
         return
-    try: await msg.delete()
-    except: pass
 
     loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
     dl = TikTokDownloader()
     try:
         info = await dl.download_video(url)
         if info['success']:
-            source = ('TikTok' if 'tiktok' in url else
-                      'Instagram' if 'instagram' in url else
-                      'Facebook')
+            # Cancella solo se download OK
+            try: await msg.delete()
+            except: pass
+
+            source = ('TikTok' if 'tiktok' in url else 'Instagram' if 'instagram' in url else 'Facebook')
             user_sender = escape(msg.from_user.full_name)
             title = escape(info.get('title') or "Video scaricato da bot multi-social!")
             orig_link = escape(url)
@@ -68,15 +60,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await loading.delete()
             os.remove(info['file_path'])
         else:
-            await loading.edit_text("❌ Contenuto non disponibile o richiede login.")
+            # NON cancella il messaggio originale
+            await loading.edit_text(
+                "❌ Errore: il video non può essere scaricato (Instagram/Facebook). Il link rimane qui in chat."
+            )
     except Exception as e:
         logger.error(f"Download error: {e}")
-        err = str(e).lower()
-        if 'login required' in err or 'cookie' in err:
-            txt = ("❌ Impossibile scaricare: contenuto privato o limitato. "
-                   "Assicurati che il post sia pubblico.")
-        else:
-            txt = "❌ Errore durante il download del video."
+        txt = "❌ Errore durante il download del video."
         await loading.edit_text(txt)
 
 async def health(request):
