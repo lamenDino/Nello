@@ -15,17 +15,18 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes,
-    CallbackQueryHandler
+    ContextTypes
 )
 from dotenv import load_dotenv
 from tiktok_downloader import TikTokDownloader
-import config
 
-# Carica le variabili d'ambiente
+# Carica variabili ambiente
 load_dotenv()
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_USER_ID', '0'))
+PORT = int(os.getenv('PORT', '8080'))
 
-# Configurazione logging
+# Config logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -36,86 +37,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class MultiPlatformBot:
-    def __init__(self):
-        self.token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.admin_id = int(os.getenv('ADMIN_USER_ID', 0))
-        self.downloader = TikTokDownloader()
-        if not self.token:
-            raise ValueError("Token Telegram non trovato! Controlla le env vars")
+def is_supported_link(url: str) -> bool:
+    domains = [
+        'tiktok.com','vm.tiktok.com','vt.tiktok.com','m.tiktok.com',
+        'instagram.com','ig.tv','facebook.com','fb.watch','fb.com'
+    ]
+    return any(d in url for d in domains)
 
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        await update.message.reply_text(
-            f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook e ti invio il video."
-        )
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook e ti invio il video."
+    )
 
-    def is_supported_video_link(self, url: str) -> bool:
-        domains = [
-            'tiktok.com','vm.tiktok.com','vt.tiktok.com','m.tiktok.com',
-            'instagram.com','ig.tv','facebook.com','fb.watch','fb.com'
-        ]
-        return any(d in url for d in domains)
+async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    url = msg.text.strip()
+    if not is_supported_link(url):
+        return
+    # delete original
+    try:
+        await msg.delete()
+    except:
+        pass
+    loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
+    dl = TikTokDownloader()
+    try:
+        info = await dl.download_video(url)
+        if info['success']:
+            # caption with source
+            source = 'TikTok' if 'tiktok' in url else 'Instagram' if 'instagram' in url else 'Facebook'
+            caption = f"🎬 Video da {source}: {info.get('uploader','')}"
+            with open(info['file_path'], 'rb') as f:
+                await context.bot.send_video(
+                    chat_id=msg.chat_id,
+                    video=f,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            await loading.delete()
+            os.remove(info['file_path'])
+        else:
+            await loading.edit_text(
+                "❌ Contenuto non disponibile o richiesto login." )
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        err = str(e)
+        if 'login required' in err or 'cookie' in err:
+            txt = ("❌ Impossibile scaricare: contenuto privato o limitato. "
+                   "Assicurati che il post sia pubblico.")
+        else:
+            txt = "❌ Errore durante il download del video."
+        await loading.edit_text(txt)
 
-    async def media_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        msg = update.message
-        url = msg.text.strip()
-        # Ignora messaggi non link supportati
-        if not self.is_supported_video_link(url):
-            return
-        try:
-            await msg.delete()
-        except:
-            pass
-        # Download video
-        loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
-        try:
-            info = await self.downloader.download_video(url)
-            if info['success']:
-                with open(info['file_path'], 'rb') as f:
-                    caption = f"🎬 Video da {info.get('uploader','')}"
-                    await context.bot.send_video(
-                        chat_id=msg.chat_id,
-                        video=f,
-                        caption=caption,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                await loading.delete()
-                os.remove(info['file_path'])
-            else:
-                await loading.edit_text(f"❌ Errore: {info['error']}")
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            await loading.edit_text("❌ Errore durante il download.")
+async def health(request):
+    return web.Response(text="OK")
 
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "Uso: invia link da TikTok, Instagram o Facebook per scaricare il video."
-        )
+async def start_web(request=None):
+    app = web.Application()
+    app.add_routes([web.get('/', health)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
 
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
-        logger.error(f"Error update {update}: {context.error}")
-
-    def run(self):
-        app = Application.builder().token(self.token).build()
-        app.add_handler(CommandHandler("start", self.start_command))
-        app.add_handler(CommandHandler("help", self.help_command))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.media_handler))
-        app.add_error_handler(self.error_handler)
-
-        # Start webserver for health check
-        loop = asyncio.get_event_loop()
-        loop.create_task(self.start_webserver())
-        app.run_polling(drop_pending_updates=True)
-
-    async def start_webserver(self):
-        port = int(os.getenv('PORT', '8080'))
-        server = web.Application()
-        server.add_routes([web.get('/', lambda r: web.Response(text="OK"))])
-        runner = web.AppRunner(server)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', port)
-        await site.start()
+async def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web())
+    await app.start()
+    await app.wait_stop()
 
 if __name__ == '__main__':
-    MultiPlatformBot().run()
+    asyncio.run(main())
