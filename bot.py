@@ -1,7 +1,3 @@
-Ecco il codice completo di `bot.py` da copiare direttamente su GitHub.  
-Questa versione gestisce l’escape dei caratteri, usa HTML per evitare errori parsing Telegram, e mostra correttamente social, mittente, link, descrizione:
-
-```python
 #!/usr/bin/env python3
 import os
 import logging
