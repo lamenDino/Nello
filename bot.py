@@ -106,8 +106,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-```
-
-Copia tutto in `bot.py`, salva e fai push! Il parsing dei titoli/link sarà sempre sicuro e il deploy sarà corretto.
-
-[1](https://github.com/lamenDino/Nello/edit/main/bot.py)
