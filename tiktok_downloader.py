@@ -28,7 +28,6 @@ class TikTokDownloader:
             if not info:
                 return {'success': False, 'error': 'Impossibile ottenere informazioni sul video'}
 
-            # yt-dlp può scaricare più file per post multipli (gallery)
             loop = asyncio.get_event_loop()
             files = []
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
