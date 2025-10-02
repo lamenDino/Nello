@@ -26,6 +26,7 @@ def insta_get_image_fallback(url):
             return img_file
     except Exception as e:
         logger.error(f"Instagram fallback scraping error: {e}")
+        pass
     return None
 
 class TikTokDownloader:
@@ -51,7 +52,6 @@ class TikTokDownloader:
             with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
                 try:
                     await loop.run_in_executor(None, ydl.download, [clean_url])
-                    # Se gallery/carousel Instagram
                     if info and 'entries' in info and info['entries']:
                         for entry in info['entries']:
                             filename = ydl.prepare_filename(entry)
@@ -63,7 +63,6 @@ class TikTokDownloader:
                             files.append(filename)
                 except Exception as e:
                     logger.warning(f"yt-dlp non ha trovato nè video nè immagini: {e}")
-                    # Se nulla estratto da yt-dlp, fallback scraping solo per Instagram
                     if "instagram.com" in clean_url:
                         img_file = insta_get_image_fallback(clean_url)
                         if img_file and os.path.exists(img_file):
@@ -85,7 +84,8 @@ class TikTokDownloader:
             }
         except Exception as e:
             logger.error(f"Errore download Instagram fallback per {url}: {str(e)}")
-            return {'success': False, 'error': str(e)}
+            pass
+        return {'success': False, 'error': str(e)}
 
     async def extract_video_info(self, url: str) -> Optional[Dict]:
         try:
@@ -96,7 +96,8 @@ class TikTokDownloader:
             return info
         except Exception as e:
             logger.error(f"Errore nell'estrazione info per {url}: {str(e)}")
-            return None
+            pass
+        return None
 
     def clean_tiktok_url(self, url: str) -> str:
         url = url.strip()
@@ -105,3 +106,7 @@ class TikTokDownloader:
                 response = requests.head(url, allow_redirects=True, timeout=10)
                 url = response.url
             except:
+                pass
+        if '?' in url:
+            url = url.split('?')[0]
+        return url
