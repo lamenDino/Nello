@@ -74,16 +74,13 @@ class TikTokBot:
 
         logger.info(f"Raw text: {text}")
 
+        # Controlla PRIMA se è un link TikTok
+        if not self.is_tiktok_link(text):
+            logger.info(f"Messaggio ignorato (non TikTok): {text}")
+            return  # Ignora silenziosamente se non è un link TikTok
+
         clean_text = self.downloader.clean_tiktok_url(text)
-
         logger.info(f"Clean text: {clean_text}")
-
-        if not self.is_tiktok_link(clean_text):
-            await message.reply_text(
-                "🤔 Link non valido. Usa: https://www.tiktok.com/@user/video/123...",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
 
         try:
             await message.delete()
@@ -171,7 +168,6 @@ class TikTokBot:
 async def handle(request):
     return web.Response(text="OK")
 
-
 async def start_webserver():
     port = int(os.getenv('PORT', '8080'))
     app = web.Application()
@@ -181,7 +177,6 @@ async def start_webserver():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logging.info(f"Web server started on port {port}")
-
 
 if __name__ == "__main__":
     bot = TikTokBot()
