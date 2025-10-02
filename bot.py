@@ -6,28 +6,21 @@ Descrizione: Usa yt-dlp per scaricare video e inviarli in chat.
 """
 import os
 import logging
+import threading
 import asyncio
 from aiohttp import web
-from telegram import Update
-from telegram.constants import ParseMode
+from telegram import Update, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
 from tiktok_downloader import TikTokDownloader
 
-# Carica variabili ambiente
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_USER_ID', '0'))
 PORT = int(os.getenv('PORT', '8080'))
 
-# Config logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -38,7 +31,7 @@ def is_supported_link(url: str) -> bool:
     ]
     return any(d in url for d in domains)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f"👋 Ciao {user.first_name}! Inviami un link TikTok, Instagram o Facebook e ti invio il video."
@@ -49,24 +42,20 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = msg.text.strip()
     if not is_supported_link(url):
         return
-    try:
-        await msg.delete()
-    except:
-        pass
+    try: await msg.delete()
+    except: pass
+
     loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
     dl = TikTokDownloader()
     try:
         info = await dl.download_video(url)
         if info['success']:
-            source = (
-                'TikTok' if 'tiktok' in url else
-                'Instagram' if 'instagram' in url else
-                'Facebook'
-            )
+            source = ('TikTok' if 'tiktok' in url else
+                      'Instagram' if 'instagram' in url else
+                      'Facebook')
             author = info.get('uploader','')
             caption = f"🎬 Video da {source}"
-            if author:
-                caption += f" di {author}"
+            if author: caption += f" di {author}"
             with open(info['file_path'], 'rb') as f:
                 await context.bot.send_video(
                     chat_id=msg.chat_id,
@@ -99,12 +88,21 @@ async def run_web():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     logger.info(f"Web server started on port {PORT}")
+    # Keep running
+    await asyncio.Event().wait()
+
+def start_webserver():
+    asyncio.run(run_web())
 
 def main():
+    # Avvia webserver in background
+    thread = threading.Thread(target=start_webserver, daemon=True)
+    thread.start()
+
+    # Avvia bot
     application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('start', start_cmd))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
-    application.job_queue.run_once(lambda _: asyncio.create_task(run_web()), 0)
     logger.info("Bot avviato...")
     application.run_polling(drop_pending_updates=True)
 
