@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 import tempfile
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import yt_dlp
 import requests
 
@@ -12,7 +12,7 @@ class TikTokDownloader:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
         self.ydl_opts = {
-            'format': 'best[ext=mp4]/best',
+            'format': 'bestvideo+bestaudio/best/bestimage',
             'outtmpl': os.path.join(self.temp_dir, '%(title)s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
@@ -27,18 +27,28 @@ class TikTokDownloader:
             info = await self.extract_video_info(clean_url)
             if not info:
                 return {'success': False, 'error': 'Impossibile ottenere informazioni sul video'}
-            file_path = await self.download_with_ytdlp(clean_url)
-            if file_path and os.path.exists(file_path):
-                return {
-                    'success': True,
-                    'file_path': file_path,
-                    'title': info.get('title', 'Video TikTok'),
-                    'uploader': info.get('uploader', 'Sconosciuto'),
-                    'duration': info.get('duration', 0),
-                    'url': clean_url
-                }
-            else:
-                return {'success': False, 'error': 'Download fallito'}
+
+            # yt-dlp può scaricare più file per post multipli (gallery)
+            loop = asyncio.get_event_loop()
+            files = []
+            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                await loop.run_in_executor(None, ydl.download, [clean_url])
+                if 'entries' in info:  # gallery / carousel Instagram
+                    for entry in info['entries']:
+                        filename = ydl.prepare_filename(entry)
+                        if os.path.exists(filename):
+                            files.append(filename)
+                else:
+                    filename = ydl.prepare_filename(info)
+                    if os.path.exists(filename):
+                        files.append(filename)
+            return {
+                'success': True if files else False,
+                'files': files,
+                'title': info.get('title', 'Post Instagram'),
+                'uploader': info.get('uploader', 'Sconosciuto'),
+                'url': clean_url
+            }
         except Exception as e:
             logger.error(f"Errore nel download di {url}: {str(e)}")
             return {'success': False, 'error': str(e)}
@@ -52,25 +62,6 @@ class TikTokDownloader:
             return info
         except Exception as e:
             logger.error(f"Errore nell'estrazione info per {url}: {str(e)}")
-            return None
-
-    async def download_with_ytdlp(self, url: str) -> Optional[str]:
-        try:
-            loop = asyncio.get_event_loop()
-            with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-                await loop.run_in_executor(None, ydl.download, [url])
-                info = await loop.run_in_executor(None, ydl.extract_info, url)
-                filename = ydl.prepare_filename(info)
-                if os.path.exists(filename):
-                    return filename
-                base = os.path.splitext(filename)[0]
-                for ext in ['.mp4', '.webm', '.mkv']:
-                    test_file = base + ext
-                    if os.path.exists(test_file):
-                        return test_file
-                return None
-        except Exception as e:
-            logger.error(f"Errore yt-dlp per {url}: {str(e)}")
             return None
 
     def clean_tiktok_url(self, url: str) -> str:
