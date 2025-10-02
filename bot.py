@@ -49,9 +49,9 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source = ('TikTok' if 'tiktok' in url else
                       'Instagram' if 'instagram' in url else
                       'Facebook')
-            user_sender = escape(msg.from_user.full_name, version=2)
-            title = escape(info.get('title') or "Video scaricato da bot multi-social!", version=2)
-            orig_link = escape(url, version=2)
+            user_sender = escape(msg.from_user.full_name)
+            title = escape(info.get('title') or "Video scaricato da bot multi-social!")
+            orig_link = escape(url)
             caption = (
                 f"Video da: {source}\n"
                 f"Video inviato da: {user_sender}\n"
