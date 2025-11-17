@@ -2,11 +2,11 @@
 # https://curl.haxx.se/rfc/cookie_spec.html
 # This is a generated file! Do not edit.
 
-.instagram.com	TRUE	/	TRUE	1797949201	csrftoken	uBLIg2WPpa36vTgFDfFxB2yFXOgXTsXW
+.instagram.com	TRUE	/	TRUE	1797950871	csrftoken	uBLIg2WPpa36vTgFDfFxB2yFXOgXTsXW
 .instagram.com	TRUE	/	TRUE	1793963692	datr	n17eaPykJ6wFm_IgdXbGCIhk
 .instagram.com	TRUE	/	TRUE	1790939783	ig_did	5FBB0AE0-79AA-4976-B2F9-D7EDB671EEE2
 .instagram.com	TRUE	/	TRUE	1793963692	mid	aN5enwALAAF9V0sstw4giy7EmIRe
-.instagram.com	TRUE	/	TRUE	1771165201	ds_user_id	77221055390
+.instagram.com	TRUE	/	TRUE	1771166871	ds_user_id	77221055390
 .instagram.com	TRUE	/	TRUE	1794925195	sessionid	77221055390%3AOPEx1jIjsnJhKu%3A25%3AAYhXUNb3r-s_WzZMHhWKJM8-Hln29wKE3pyonuB02g
-.instagram.com	TRUE	/	TRUE	1763993996	wd	1869x919
-.instagram.com	TRUE	/	TRUE	0	rur	"CLN\05477221055390\0541794925130:01fedee46a9da8621a3ff85b35706e0f7ed57939fc5c079e27c62684a64385a73fdb3899"
+.instagram.com	TRUE	/	TRUE	1763995540	wd	1869x919
+.instagram.com	TRUE	/	TRUE	0	rur	"CLN\05477221055390\0541794926800:01fe783eb94765c9e6018ae6b2441baf60d3fc4d7b5b8f13f63ab99d22e00ef8a2a77cab"
