@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Telegram Bot v4.3.4 FINAL - NO parse_mode for captions
-- Rimuovi parse_mode='Markdown' dalle caption
-- Le caption vanno in PLAIN TEXT (no formatting)
-- Solo emoji per decorazione
-- RISOLVE "Can't parse entities" definitivamente!
+Telegram Bot v4.3.5 - New Caption Format with Icons
+- Formattazione NUOVA per le caption
+- Icone su ogni riga
+- Plain text (NO parse_mode)
+- Link completo in caption
 """
 
 import logging
@@ -34,7 +34,7 @@ if not BOT_TOKEN:
 # Inizializza downloader
 downloader = SocialMediaDownloader()
 
-def sanitize_caption(text: str, max_length: int = 1024) -> str:
+def sanitize_caption(text: str, max_length: int = 500) -> str:
     """Sanitizza caption per Telegram - PLAIN TEXT (NO Markdown)"""
     if not text:
         return "Video"
@@ -66,15 +66,44 @@ def sanitize_caption(text: str, max_length: int = 1024) -> str:
     for char, replacement in problematic_chars.items():
         text = text.replace(char, replacement)
     
-    # Rimuovi URL
-    text = re.sub(r'https?://[^\s]+', '[link]', text)
+    # Rimuovi URL dalla stringa stessa (sarà aggiunto separatamente)
+    text = re.sub(r'https?://[^\s]+', '', text)
     
-    # Rimuovi caratteri Markdown che causano problemi
-    # Quando parse_mode=None, questi non sono interpretati ma possono causare problemi
+    # Rimuovi caratteri Markdown
     text = text.replace('`', "'")
     text = text.replace('```', "'''")
     
     return text.strip()
+
+def format_caption(title: str, uploader: str, platform: str, url: str) -> str:
+    """Formatta la caption con icone e struttura richiesta"""
+    
+    # Emoji per piattaforma
+    emoji_map = {
+        'instagram': '📷',
+        'tiktok': '🎵',
+        'youtube': '▶️',
+        'facebook': '👍',
+        'twitter': '🐦',
+        'unknown': '📹'
+    }
+    platform_emoji = emoji_map.get(platform, '📹')
+    
+    # Sanitizza il titolo (max 100 chars)
+    title = sanitize_caption(title, 100)
+    
+    # Sanitizza l'uploader
+    uploader = sanitize_caption(uploader, 50)
+    
+    # Formatta caption con nuova struttura
+    caption = (
+        f"🌐 Video da: {platform.capitalize()}\n"
+        f"👤 Video inviato da: {uploader}\n"
+        f"🔗 Link originale: {url}\n"
+        f"📝 Nome Video: {title}"
+    )
+    
+    return caption
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler comando /start"""
@@ -131,27 +160,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         title = result.get('title', 'Video')
         uploader = result.get('uploader', 'Sconosciuto')
         platform = result.get('platform', 'unknown')
+        original_url = result.get('url', url)
         
-        # Emoji per piattaforma
-        emoji_map = {
-            'instagram': '📷',
-            'tiktok': '🎵',
-            'youtube': '▶️',
-            'facebook': '👍',
-            'twitter': '🐦',
-            'unknown': '📹'
-        }
-        platform_emoji = emoji_map.get(platform, '📹')
-        
-        # Formattazione messaggio - PLAIN TEXT (NO Markdown)
-        caption = (
-            f"{platform_emoji} Video da: {platform.capitalize()}\n"
-            f"👤 Uploader: {uploader}\n"
-            f"📝 {title[:100]}"
-        )
-        
-        # SANITIZZA CAPTION
-        caption = sanitize_caption(caption)
+        # FORMATTA CAPTION CON NUOVA STRUTTURA
+        caption = format_caption(title, uploader, platform, original_url)
         
         # CHECK: È un carosello?
         if result.get('is_carousel'):
@@ -279,7 +291,7 @@ async def start_http_server():
 
 def main() -> None:
     """Avvia il bot"""
-    logger.info("🤖 Bot Telegram v4.3.4 FINAL in avvio...")
+    logger.info("🤖 Bot Telegram v4.3.5 in avvio...")
     
     # Crea application
     application = Application.builder().token(BOT_TOKEN).build()
