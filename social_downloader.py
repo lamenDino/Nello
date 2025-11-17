@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v4.1 FINAL - FACEBOOK BACK TO YT-DLP
-- Facebook: Ritorna a yt-dlp (ma con workaround per bug)
-- Usa --no-check-certificates e --socket-timeout aumentato
-- Caroselli Instagram/TikTok completi
-- Fallback intelligente se yt-dlp fallisce
+Social Media Downloader v4.3 - TIKTOK CAROUSEL PHOTOS SUPPORT
+- TikTok /photo/ → Estrae tutte le foto del carosello
+- Instagram /carousel/ → Album Telegram (come prima)
+- Invia come album Telegram (media_group)
 """
 
 import os
@@ -81,7 +80,7 @@ class SocialMediaDownloader:
         """Valida URL e rileva tipi non supportati"""
         url_lower = url.lower()
         
-        # TikTok: caroselli foto - SUPPORTATI
+        # TikTok: caroselli foto (/photo/) - ORA SUPPORTATI in v4.3!
         if 'tiktok' in url_lower and '/photo/' in url_lower:
             return True, None, True
         
@@ -112,9 +111,10 @@ class SocialMediaDownloader:
         return True, None, False
     
     async def extract_carousel_items(self, url: str) -> Optional[List[str]]:
-        """Estrae gli URL di tutte le foto/video dal carosello"""
+        """Estrae gli URL di tutte le foto/video dal carosello (Instagram + TikTok)"""
         try:
-            logger.info(f"Estrazione carosello: {url}")
+            platform = 'TikTok' if 'tiktok' in url.lower() else 'Instagram'
+            logger.info(f"Estrazione carosello {platform}: {url}")
             
             loop = asyncio.get_event_loop()
             
@@ -132,7 +132,7 @@ class SocialMediaDownloader:
                             for item in info['entries']:
                                 if item:
                                     urls.append(item.get('url') or item.get('id'))
-                            logger.info(f"Trovate {len(urls)} item nel carosello")
+                            logger.info(f"Trovate {len(urls)} item nel carosello {platform}")
                             return urls
                     
                     return None
@@ -147,10 +147,10 @@ class SocialMediaDownloader:
             logger.error(f"Carousel extraction failed: {e}")
             return None
     
-    async def download_carousel_items(self, carousel_urls: List[str]) -> Optional[List[Dict]]:
+    async def download_carousel_items(self, carousel_urls: List[str], platform: str = 'generic') -> Optional[List[Dict]]:
         """Scarica tutti i file del carosello"""
         try:
-            logger.info(f"Download {len(carousel_urls)} item da carosello...")
+            logger.info(f"Download {len(carousel_urls)} item da carosello {platform}...")
             
             files = []
             
@@ -225,16 +225,15 @@ class SocialMediaDownloader:
                 'Origin': 'https://www.youtube.com',
             })
         
-        # Facebook: Opzioni speciali per evitare bug
+        # Facebook: Opzioni speciali
         if platform == 'facebook' or 'facebook' in url.lower():
             opts['format'] = 'best/worst'
-            opts['socket_timeout'] = 60  # Timeout più lungo
+            opts['socket_timeout'] = 60
             opts['no_check_certificates'] = True
             opts['http_headers'].update({
                 'Referer': 'https://www.facebook.com/',
                 'Origin': 'https://www.facebook.com',
             })
-            logger.info("Facebook: opzioni speciali yt-dlp attivate")
         
         # TikTok
         if platform == 'tiktok' or 'tiktok' in url.lower():
@@ -266,13 +265,13 @@ class SocialMediaDownloader:
         clean_url = await self.clean_url_async(url)
         logger.info(f"URL finale: {clean_url}")
         
-        # CAROSELLO
+        # CAROSELLO (Instagram + TikTok /photo/)
         if is_carousel:
-            logger.info("Carosello rilevato - estrazione items...")
+            logger.info(f"Carosello rilevato ({platform}) - estrazione items...")
             
             carousel_urls = await self.extract_carousel_items(clean_url)
             if carousel_urls:
-                carousel_files = await self.download_carousel_items(carousel_urls)
+                carousel_files = await self.download_carousel_items(carousel_urls, platform)
                 if carousel_files:
                     return {
                         'success': True,
@@ -288,7 +287,7 @@ class SocialMediaDownloader:
             
             return {'success': False, 'error': '⚠️ Errore estrazione carosello.'}
         
-        # DOWNLOAD STANDARD (yt-dlp per tutti, incluso Facebook v4.1!)
+        # DOWNLOAD STANDARD (per tutti gli altri)
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}")
