@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Telegram Bot v4.3.2 - Sanitize caption for Telegram entities
-- Rimuovi/escape caratteri speciali dalle caption
-- Fix "Can't parse entities" error
-- Supporto caroselli e album Telegram
+Telegram Bot v4.3.3 - Add HTTP health check for Render
+- Telegram bot con polling (non webhook)
+- Aggiungi server HTTP per health check (porta 10000)
+- Render non si lamenta di "No open ports detected"
 """
 
 import logging
@@ -45,8 +45,6 @@ def sanitize_caption(text: str, max_length: int = 1024) -> str:
     text = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f]', '', text)
     
     # Rimuovi caratteri speciali Telegram che causano parsing issues
-    # Mantieni: _ * [ ] ( ) ~ ` | -
-    # Rimuovi/sostituisci tutto il resto
     problematic_chars = {
         '：': ':',      # Doppio punto cinese
         '。': '.',      # Punto cinese
@@ -70,7 +68,7 @@ def sanitize_caption(text: str, max_length: int = 1024) -> str:
     # Rimuovi URL ma mantieni il link
     text = re.sub(r'https?://[^\s]+', '[link]', text)
     
-    # Escape backtick multipli (Telegram non supporta)
+    # Escape backtick multipli
     text = text.replace('```', '`')
     
     return text.strip()
@@ -245,16 +243,40 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handler errori con retry per Conflict"""
     error = context.error
     
-    # Se è Conflict, ignora (retry automatico)
+    # Se è Conflict, ignora
     if isinstance(error, Conflict):
         logger.warning(f"Conflict error (retry automatico): {error}")
         return
     
     logger.error(f"Update {update} caused error {error}")
 
+async def health_check_handler(request):
+    """Handler per health check HTTP (Render port binding)"""
+    logger.info("Health check ricevuto")
+    from aiohttp import web
+    return web.Response(text="OK", status=200)
+
+async def start_http_server():
+    """Avvia server HTTP per Render port binding"""
+    from aiohttp import web
+    
+    app = web.Application()
+    app.router.add_get('/', health_check_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.getenv('PORT', 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"✅ HTTP server avviato su porta {port}")
+    
+    return runner
+
 def main() -> None:
     """Avvia il bot"""
-    logger.info("🤖 Bot Telegram v4.3.2 in avvio...")
+    logger.info("🤖 Bot Telegram v4.3.3 in avvio...")
     
     # Crea application
     application = Application.builder().token(BOT_TOKEN).build()
@@ -270,9 +292,17 @@ def main() -> None:
     # Avvia polling con retry per Conflict
     logger.info("✅ Bot avviato e in ascolto...")
     try:
+        # Avvia HTTP server in background per Render port binding
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Avvia server HTTP
+        http_runner = loop.run_until_complete(start_http_server())
+        
+        # Avvia bot polling
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True  # Scarta vecchi messaggi in coda
+            drop_pending_updates=True
         )
     except Conflict as e:
         logger.error(f"Conflict error all'avvio: {e}")
