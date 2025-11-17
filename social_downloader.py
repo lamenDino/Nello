@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v3.3 - BYPASS Facebook Parsing Bug
-- Facebook: Usa metodo alternativo (direct video extraction)
-- YouTube Shorts: User-Agent pool + headers
-- Instagram: Completo con cookies
-- Tutti gli errori gestiti intelligentemente
+Social Media Downloader v3.4 - FIXATO Facebook URL schema bug
+- Corregge URL senza https:// (aggiunge schema automatico)
+- Supporta link /share/ di Facebook
+- Direct extraction con regex
+- Instagram, YouTube, TikTok con yt-dlp
 """
 
 import os
 import asyncio
 import logging
 import tempfile
-import json
 import re
 from typing import Dict, Optional
 import yt_dlp
 import requests
 import subprocess
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,14 @@ class SocialMediaDownloader:
         import random
         return random.choice(self.user_agents)
     
+    def fix_facebook_url_scheme(self, url: str) -> str:
+        """Aggiunge https:// se manca (schema incompleto)"""
+        if url.startswith('//'):
+            return 'https:' + url
+        elif not url.startswith('http'):
+            return 'https://' + url
+        return url
+    
     def get_ydl_opts(self, url: str, attempt: int = 0) -> Dict:
         """Ottiene opzioni yt-dlp per piattaforma"""
         opts = self.base_opts.copy()
@@ -108,9 +116,6 @@ class SocialMediaDownloader:
                 'Origin': 'https://www.youtube.com',
             })
         
-        # Facebook: SKIP yt-dlp for this platform
-        # Useremo metodo alternativo
-        
         # TikTok
         if 'tiktok' in url.lower():
             opts['http_headers'].update({
@@ -121,7 +126,7 @@ class SocialMediaDownloader:
         return opts
     
     async def extract_facebook_direct(self, url: str) -> Optional[Dict]:
-        """Estrae video Facebook direttamente senza yt-dlp"""
+        """Estrae video Facebook direttamente"""
         try:
             logger.info(f"Facebook direct extraction: {url}")
             
@@ -135,53 +140,103 @@ class SocialMediaDownloader:
             
             def _extract():
                 try:
-                    # Prova a estrarre l'ID video
-                    response = requests.get(url, headers=headers, timeout=10)
+                    # Risolvi URL /share/ prima
+                    final_url = url
+                    if '/share/' in url.lower():
+                        try:
+                            response = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
+                            final_url = response.url
+                            logger.info(f"URL /share/ risolto: {final_url}")
+                        except:
+                            pass
                     
-                    # Cerca il video URL nella pagina
-                    # Pattern: "video_url":"https://...mp4"
+                    # Scarica la pagina
+                    response = requests.get(final_url, headers=headers, timeout=15)
+                    response.raise_for_status()
+                    
+                    html = response.text
+                    
+                    # Patterns per trovare il video
                     video_patterns = [
+                        # Pattern 1: video_url
                         r'"video_url":"([^"]+\.mp4[^"]*)"',
-                        r'"src":"([^"]+\.mp4[^"]*)"',
-                        r'href="([^"]+/video[^"]+)"',
-                        r'"url":"([^"]+\.mp4[^"]*)"',
+                        r'"video_url":"([^"\\]+(?:\\/[^"\\]*)?)"',
+                        
+                        # Pattern 2: src per video
+                        r'"src":"(https?://[^"]+\.mp4[^"]*)"',
+                        r'"src":"(//[^"]+\.mp4[^"]*)"',
+                        
+                        # Pattern 3: URL generico
+                        r'"url":"(https?://[^"]+\.mp4[^"]*)"',
+                        r'"url":"(//[^"]+\.mp4[^"]*)"',
+                        
+                        # Pattern 4: Direct video element
+                        r'<video[^>]+src="([^"]+\.mp4)"',
+                        r'<source[^>]+src="([^"]+\.mp4)"',
                     ]
                     
                     for pattern in video_patterns:
-                        matches = re.findall(pattern, response.text)
+                        matches = re.findall(pattern, html)
                         if matches:
                             video_url = matches[0]
-                            # Unescape URL
-                            video_url = video_url.replace('\\/', '/')
-                            logger.info(f"Trovato video URL: {video_url[:50]}...")
                             
-                            return {
-                                'url': video_url,
-                                'title': 'Facebook Reel',
-                                'uploader': 'Facebook User',
-                                'duration': 0,
-                            }
+                            # Unescape URL
+                            video_url = video_url.replace('\\/', '/').replace('\\', '')
+                            
+                            # FIX: Aggiungi https:// se manca
+                            video_url = self._fix_url_scheme(video_url)
+                            
+                            # Valida URL
+                            if video_url.startswith('http'):
+                                logger.info(f"Trovato video URL: {video_url[:80]}...")
+                                
+                                return {
+                                    'url': video_url,
+                                    'title': 'Facebook Reel',
+                                    'uploader': 'Facebook User',
+                                    'duration': 0,
+                                }
                     
+                    logger.warning("Nessun video trovato nella pagina")
                     return None
+                
                 except Exception as e:
-                    logger.error(f"Facebook direct extraction error: {e}")
+                    logger.error(f"Facebook extraction error: {e}")
                     return None
             
             result = await loop.run_in_executor(None, _extract)
             return result
         
         except Exception as e:
-            logger.error(f"Facebook direct extraction failed: {e}")
+            logger.error(f"Facebook extraction failed: {e}")
             return None
+    
+    def _fix_url_scheme(self, url: str) -> str:
+        """Fissa URL senza schema"""
+        url = url.strip()
+        
+        # Se inizia con //, aggiungi https:
+        if url.startswith('//'):
+            url = 'https:' + url
+        
+        # Se non ha schema, aggiungi https://
+        elif not url.startswith('http'):
+            url = 'https://' + url
+        
+        return url
     
     async def download_facebook_direct(self, video_url: str) -> Optional[str]:
         """Scarica video Facebook direttamente"""
         try:
-            logger.info(f"Scaricando video Facebook diretto...")
+            logger.info(f"Scaricando video Facebook...")
+            
+            # Fissa URL se necessario
+            video_url = self._fix_url_scheme(video_url)
             
             headers = {
                 'User-Agent': self.get_random_user_agent(),
                 'Referer': 'https://www.facebook.com/',
+                'Range': 'bytes=0-',
             }
             
             loop = asyncio.get_event_loop()
@@ -204,6 +259,7 @@ class SocialMediaDownloader:
                     
                     logger.info(f"Facebook video salvato: {filename}")
                     return filename
+                
                 except Exception as e:
                     logger.error(f"Errore download Facebook: {e}")
                     return None
@@ -246,10 +302,10 @@ class SocialMediaDownloader:
                         'url': url
                     }
             
-            # Se fallisce, ritorna errore specifico
+            # Se fallisce
             return {
                 'success': False,
-                'error': '⚠️ Reel Facebook non disponibile per il download. Potrebbe essere privato o protetto.'
+                'error': '⚠️ Reel Facebook non disponibile. Potrebbe essere privato o protetto.'
             }
         
         # Per altre piattaforme: retry loop standard
