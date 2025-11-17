@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v3.2 - FIXATO YouTube Shorts + Facebook Reels
-- YouTube Shorts: Contorna bot detection con headers e proxy
-- Facebook Reels: Retry con user-agent alternati
-- Instagram: Fix completo da v3.1
-- Gestione errori robusta per tutte le piattaforme
+Social Media Downloader v3.3 - BYPASS Facebook Parsing Bug
+- Facebook: Usa metodo alternativo (direct video extraction)
+- YouTube Shorts: User-Agent pool + headers
+- Instagram: Completo con cookies
+- Tutti gli errori gestiti intelligentemente
 """
 
 import os
 import asyncio
 import logging
 import tempfile
-import time
+import json
+import re
 from typing import Dict, Optional
 import yt_dlp
 import requests
@@ -30,12 +31,13 @@ class SocialMediaDownloader:
         # Controlla e aggiorna yt-dlp
         self.check_ytdlp_version()
         
-        # User-Agent pool per evitare blocchi
+        # User-Agent pool
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1',
+            'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
         ]
         
         self.base_opts = {
@@ -72,50 +74,44 @@ class SocialMediaDownloader:
             logger.warning(f"Errore check yt-dlp: {e}")
     
     def get_random_user_agent(self) -> str:
-        """Ritorna un user-agent random"""
+        """Ritorna user-agent random"""
         import random
         return random.choice(self.user_agents)
     
     def get_ydl_opts(self, url: str, attempt: int = 0) -> Dict:
-        """Ottiene opzioni yt-dlp personalizzate per piattaforma"""
+        """Ottiene opzioni yt-dlp per piattaforma"""
         opts = self.base_opts.copy()
         
-        # User-Agent per evitare blocchi
+        # Headers universali
         opts['http_headers'] = {
             'User-Agent': self.get_random_user_agent(),
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         }
         
-        # Instagram: aggiungi cookies
+        # Instagram
         if 'instagram' in url.lower():
             if os.path.exists(self.instagram_cookies):
                 opts['cookiefile'] = self.instagram_cookies
                 logger.info("Instagram: usando cookies")
         
-        # YouTube: aggiungi cookies e contorna bot detection
+        # YouTube
         if 'youtube' in url.lower() or 'youtu.be' in url.lower():
             opts['match_filters'] = ['duration<=60']
             
-            # Prova con cookies YouTube se disponibili
             if attempt == 0 and os.path.exists(self.youtube_cookies):
                 opts['cookiefile'] = self.youtube_cookies
                 logger.info("YouTube: usando cookies")
             
-            # Aggiungi header specifici per YouTube Shorts
             opts['http_headers'].update({
                 'Referer': 'https://www.youtube.com/',
                 'Origin': 'https://www.youtube.com',
             })
         
-        # Facebook: aggiungi headers specifici
-        if 'facebook' in url.lower():
-            opts['http_headers'].update({
-                'Referer': 'https://www.facebook.com/',
-                'Origin': 'https://www.facebook.com',
-            })
+        # Facebook: SKIP yt-dlp for this platform
+        # Useremo metodo alternativo
         
-        # TikTok: aggiungi headers
+        # TikTok
         if 'tiktok' in url.lower():
             opts['http_headers'].update({
                 'Referer': 'https://www.tiktok.com/',
@@ -124,8 +120,103 @@ class SocialMediaDownloader:
         
         return opts
     
+    async def extract_facebook_direct(self, url: str) -> Optional[Dict]:
+        """Estrae video Facebook direttamente senza yt-dlp"""
+        try:
+            logger.info(f"Facebook direct extraction: {url}")
+            
+            headers = {
+                'User-Agent': self.get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': 'https://www.facebook.com/',
+            }
+            
+            loop = asyncio.get_event_loop()
+            
+            def _extract():
+                try:
+                    # Prova a estrarre l'ID video
+                    response = requests.get(url, headers=headers, timeout=10)
+                    
+                    # Cerca il video URL nella pagina
+                    # Pattern: "video_url":"https://...mp4"
+                    video_patterns = [
+                        r'"video_url":"([^"]+\.mp4[^"]*)"',
+                        r'"src":"([^"]+\.mp4[^"]*)"',
+                        r'href="([^"]+/video[^"]+)"',
+                        r'"url":"([^"]+\.mp4[^"]*)"',
+                    ]
+                    
+                    for pattern in video_patterns:
+                        matches = re.findall(pattern, response.text)
+                        if matches:
+                            video_url = matches[0]
+                            # Unescape URL
+                            video_url = video_url.replace('\\/', '/')
+                            logger.info(f"Trovato video URL: {video_url[:50]}...")
+                            
+                            return {
+                                'url': video_url,
+                                'title': 'Facebook Reel',
+                                'uploader': 'Facebook User',
+                                'duration': 0,
+                            }
+                    
+                    return None
+                except Exception as e:
+                    logger.error(f"Facebook direct extraction error: {e}")
+                    return None
+            
+            result = await loop.run_in_executor(None, _extract)
+            return result
+        
+        except Exception as e:
+            logger.error(f"Facebook direct extraction failed: {e}")
+            return None
+    
+    async def download_facebook_direct(self, video_url: str) -> Optional[str]:
+        """Scarica video Facebook direttamente"""
+        try:
+            logger.info(f"Scaricando video Facebook diretto...")
+            
+            headers = {
+                'User-Agent': self.get_random_user_agent(),
+                'Referer': 'https://www.facebook.com/',
+            }
+            
+            loop = asyncio.get_event_loop()
+            
+            def _download():
+                try:
+                    response = requests.get(video_url, headers=headers, timeout=30, stream=True)
+                    response.raise_for_status()
+                    
+                    # Salva il file
+                    filename = os.path.join(
+                        self.temp_dir,
+                        f'facebook_video_{int(__import__("time").time())}.mp4'
+                    )
+                    
+                    with open(filename, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    logger.info(f"Facebook video salvato: {filename}")
+                    return filename
+                except Exception as e:
+                    logger.error(f"Errore download Facebook: {e}")
+                    return None
+            
+            result = await loop.run_in_executor(None, _download)
+            return result
+        
+        except Exception as e:
+            logger.error(f"Facebook download error: {e}")
+            return None
+    
     async def download_video(self, url: str) -> Dict:
-        """Download principale con retry per tutte le piattaforme"""
+        """Download principale"""
         
         # Controlla foto Instagram
         if 'instagram' in url.lower() and '/p/' in url.lower():
@@ -136,13 +227,38 @@ class SocialMediaDownloader:
                     'error': '📸 Questo è un POST/FOTO Instagram, non un video!'
                 }
         
-        # Retry loop
+        # SPECIAL HANDLING per Facebook
+        if 'facebook' in url.lower():
+            logger.info("Facebook detected - using direct extraction method")
+            
+            # Prova metodo diretto
+            info = await self.extract_facebook_direct(url)
+            if info:
+                file_path = await self.download_facebook_direct(info['url'])
+                if file_path and os.path.exists(file_path):
+                    return {
+                        'success': True,
+                        'file_path': file_path,
+                        'title': info.get('title', 'Facebook Reel'),
+                        'uploader': info.get('uploader', 'Facebook User'),
+                        'duration': info.get('duration', 0),
+                        'platform': 'facebook',
+                        'url': url
+                    }
+            
+            # Se fallisce, ritorna errore specifico
+            return {
+                'success': False,
+                'error': '⚠️ Reel Facebook non disponibile per il download. Potrebbe essere privato o protetto.'
+            }
+        
+        # Per altre piattaforme: retry loop standard
         for attempt in range(self.max_retries):
             try:
                 clean_url = self.clean_url(url)
                 platform = self.detect_platform(clean_url)
                 
-                logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}: {clean_url}")
+                logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}")
                 
                 # Estrai info
                 info = await self.extract_info(clean_url, attempt)
@@ -191,16 +307,10 @@ class SocialMediaDownloader:
                 error_str = str(e).lower()
                 logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
                 
-                # Gestisci errori specifici
                 if 'sign in' in error_str or 'bot' in error_str:
                     return {
                         'success': False,
-                        'error': '🤖 YouTube chiede autenticazione (bot detection). Riprova tra poco.'
-                    }
-                elif 'cannot parse' in error_str or 'parse' in error_str:
-                    return {
-                        'success': False,
-                        'error': '⚠️ Facebook ha cambiato struttura. Riprova con un altro reel.'
+                        'error': '🤖 YouTube chiede autenticazione. Riprova tra poco.'
                     }
                 elif 'no video formats found' in error_str:
                     return {
@@ -218,7 +328,7 @@ class SocialMediaDownloader:
         }
     
     async def check_if_video(self, url: str) -> bool:
-        """Verifica se è video o foto Instagram"""
+        """Verifica se è video Instagram"""
         try:
             loop = asyncio.get_event_loop()
             
@@ -236,7 +346,7 @@ class SocialMediaDownloader:
             return True
     
     async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
-        """Estrae info video"""
+        """Estrai info video"""
         try:
             opts = self.get_ydl_opts(url, attempt)
             opts['skip_download'] = True
@@ -253,7 +363,7 @@ class SocialMediaDownloader:
         except Exception as e:
             logger.error(f"Extract info attempt {attempt}: {str(e)[:200]}")
             
-            # Fallback per YouTube con user-agent diverso
+            # Fallback per YouTube
             if 'youtube' in url.lower() and attempt < 2:
                 try:
                     opts = self.get_ydl_opts(url, attempt + 1)
@@ -355,15 +465,11 @@ class SocialMediaDownloader:
         return 'unknown'
     
     def get_error_message_for_platform(self, platform: str, error_type: str) -> str:
-        """Messaggio errore personalizzato per piattaforma"""
+        """Messaggio errore per piattaforma"""
         messages = {
             'youtube': {
                 'extraction_failed': '🤖 YouTube chiede autenticazione. Riprova tra poco.',
                 'download_failed': '⚠️ Non riesco a scaricare lo short. Riprova.',
-            },
-            'facebook': {
-                'extraction_failed': '⚠️ Facebook ha cambiato struttura. Riprova con un altro reel.',
-                'download_failed': '🔒 Non riesco a scaricare il reel. Potrebbe essere privato.',
             },
             'instagram': {
                 'extraction_failed': '🔒 Post privato o cookies scaduti.',
