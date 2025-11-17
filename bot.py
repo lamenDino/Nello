@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Telegram Bot v4.1 - Social Media Downloader
-- Supporto caroselli Instagram/TikTok
-- Album Telegram per caroselli
-- FIXATO: Conflict error con retry logic
+Telegram Bot v4.3.2 - Sanitize caption for Telegram entities
+- Rimuovi/escape caratteri speciali dalle caption
+- Fix "Can't parse entities" error
+- Supporto caroselli e album Telegram
 """
 
 import logging
 import asyncio
 import os
+import re
 from pathlib import Path
 
 from telegram import Update, InputMediaPhoto, InputMediaVideo
@@ -31,6 +32,48 @@ if not BOT_TOKEN:
 
 # Inizializza downloader
 downloader = SocialMediaDownloader()
+
+def sanitize_caption(text: str, max_length: int = 1024) -> str:
+    """Sanitizza caption per Telegram (rimuove/escapa caratteri problematici)"""
+    if not text:
+        return "Video"
+    
+    # Limita lunghezza
+    text = text[:max_length]
+    
+    # Rimuovi caratteri di controllo
+    text = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f]', '', text)
+    
+    # Rimuovi caratteri speciali Telegram che causano parsing issues
+    # Mantieni: _ * [ ] ( ) ~ ` | -
+    # Rimuovi/sostituisci tutto il resto
+    problematic_chars = {
+        '：': ':',      # Doppio punto cinese
+        '。': '.',      # Punto cinese
+        '，': ',',      # Virgola cinese
+        '；': ';',      # Punto virgola cinese
+        '！': '!',      # Esclamativo cinese
+        '？': '?',      # Punto interrogativo cinese
+        ''': "'",       # Apice sinistro
+        ''': "'",       # Apice destro
+        '"': '"',       # Virgolette sinistre
+        '"': '"',       # Virgolette destre
+        '…': '...',     # Ellissi
+        '–': '-',       # En dash
+        '—': '-',       # Em dash
+        '‐': '-',       # Hyphen
+    }
+    
+    for char, replacement in problematic_chars.items():
+        text = text.replace(char, replacement)
+    
+    # Rimuovi URL ma mantieni il link
+    text = re.sub(r'https?://[^\s]+', '[link]', text)
+    
+    # Escape backtick multipli (Telegram non supporta)
+    text = text.replace('```', '`')
+    
+    return text.strip()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler comando /start"""
@@ -103,9 +146,11 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         caption = (
             f"{platform_emoji} **Video da: {platform.capitalize()}**\n"
             f"👤 Video inviato da: **{uploader}**\n"
-            f"🔗 Link originale: {url}\n"
             f"📝 Titolo: {title[:100]}"
         )
+        
+        # SANITIZZA CAPTION!
+        caption = sanitize_caption(caption)
         
         # CHECK: È un carosello?
         if result.get('is_carousel'):
@@ -209,7 +254,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     """Avvia il bot"""
-    logger.info("🤖 Bot Telegram v4.1 in avvio...")
+    logger.info("🤖 Bot Telegram v4.3.2 in avvio...")
     
     # Crea application
     application = Application.builder().token(BOT_TOKEN).build()

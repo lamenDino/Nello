@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v4.3.1 FINAL - FACEBOOK REGEX FALLBACK
-- Facebook: yt-dlp come principale
-- Se yt-dlp fallisce → Fallback a regex extraction (HTML parsing)
-- TikTok caroselli foto SUPPORTATI
-- Instagram caroselli SUPPORTATI
+Social Media Downloader v4.3.1 FIXED - FACEBOOK "Cannot parse data" BUG FIX
+- Facebook: yt-dlp FALLISCE? → Salta regex subito!
+- Non aspetta tentativi, vai diretto al regex fallback
+- TikTok caroselli + Instagram caroselli SUPPORTATI
 """
 
 import os
@@ -406,32 +405,11 @@ class SocialMediaDownloader:
             
             return {'success': False, 'error': '⚠️ Errore estrazione carosello.'}
         
-        # FACEBOOK: Tenta yt-dlp, fallback a regex
+        # FACEBOOK: SALTA YT-DLP, USA REGEX SUBITO!
         if platform == 'facebook':
-            logger.info("Facebook - tentando yt-dlp...")
+            logger.info("Facebook - usando regex extraction (NO yt-dlp parsing bug!)")
             
-            # Tenta yt-dlp prima
-            for attempt in range(2):
-                try:
-                    info = await self.extract_info(clean_url, attempt, platform)
-                    if info:
-                        file_path = await self.download_with_ytdlp(clean_url, attempt, platform)
-                        if file_path and os.path.exists(file_path):
-                            uploader = info.get('uploader', 'Sconosciuto')
-                            return {
-                                'success': True,
-                                'file_path': file_path,
-                                'title': info.get('title', 'Video'),
-                                'uploader': uploader,
-                                'duration': info.get('duration', 0),
-                                'platform': platform,
-                                'url': clean_url
-                            }
-                except Exception as e:
-                    logger.warning(f"yt-dlp fallito: {e}")
-            
-            # Fallback: Regex extraction
-            logger.info("Facebook - usando regex fallback...")
+            # FALLBACK DIRETTO: Regex extraction
             video_url = await self.extract_facebook_video_url_regex(clean_url)
             if video_url:
                 file_path = await self.download_facebook_video(video_url)
