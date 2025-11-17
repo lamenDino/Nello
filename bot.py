@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Telegram Bot v4.0 - Social Media Downloader
+Telegram Bot v4.1 - Social Media Downloader
 - Supporto caroselli Instagram/TikTok
 - Album Telegram per caroselli
-- Formattazione con emoji + nome utente
-- Video/foto da tutti i social
+- FIXATO: Conflict error con retry logic
 """
 
 import logging
@@ -14,7 +13,7 @@ from pathlib import Path
 
 from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.error import TelegramError
+from telegram.error import TelegramError, Conflict
 
 from social_downloader import SocialMediaDownloader
 
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Carica variabili ambiente
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN non trovato nelle variabili ambiente")
+    raise ValueError("BOT_TOKEN non trovato")
 
 # Inizializza downloader
 downloader = SocialMediaDownloader()
@@ -122,7 +121,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 try:
                     with open(file_path, 'rb') as file:
                         if file_type == 'photo':
-                            # Aggiungi caption solo al primo item
                             media_group.append(
                                 InputMediaPhoto(
                                     media=file,
@@ -199,12 +197,19 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await loading_msg.edit_text(f"❌ Errore: {str(e)[:100]}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler errori"""
-    logger.error(f"Update {update} caused error {context.error}")
+    """Handler errori con retry per Conflict"""
+    error = context.error
+    
+    # Se è Conflict, ignora (retry automatico)
+    if isinstance(error, Conflict):
+        logger.warning(f"Conflict error (retry automatico): {error}")
+        return
+    
+    logger.error(f"Update {update} caused error {error}")
 
 def main() -> None:
     """Avvia il bot"""
-    logger.info("🤖 Bot Telegram v4.0 in avvio...")
+    logger.info("🤖 Bot Telegram v4.1 in avvio...")
     
     # Crea application
     application = Application.builder().token(BOT_TOKEN).build()
@@ -217,9 +222,18 @@ def main() -> None:
     # Error handler
     application.add_error_handler(error_handler)
     
-    # Avvia polling
+    # Avvia polling con retry per Conflict
     logger.info("✅ Bot avviato e in ascolto...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True  # Scarta vecchi messaggi in coda
+        )
+    except Conflict as e:
+        logger.error(f"Conflict error all'avvio: {e}")
+        logger.info("Riavvia il bot manualmente su Render")
+    except KeyboardInterrupt:
+        logger.info("Bot stoppato")
 
 if __name__ == '__main__':
     main()
