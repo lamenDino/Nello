@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v3.4 - FIXATO Facebook URL schema bug
-- Corregge URL senza https:// (aggiunge schema automatico)
-- Supporta link /share/ di Facebook
-- Direct extraction con regex
-- Instagram, YouTube, TikTok con yt-dlp
+Social Media Downloader v3.6 - FACEBOOK HTTP 400 FIXED
+- Aggiunge headers completi per evitare blocco Facebook (400 Bad Request)
+- Connection keep-alive, Accept-Encoding, etc.
+- Supporto completo per /reel/ e /share/ link
+- Instagram, YouTube, TikTok con yt-dlp standard
 """
 
 import os
@@ -16,7 +16,6 @@ from typing import Dict, Optional
 import yt_dlp
 import requests
 import subprocess
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +36,25 @@ class SocialMediaDownloader:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1',
-            'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
         ]
+        
+        # Headers completi per evitare 400 Bad Request
+        self.facebook_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'max-age=0',
+            'Connection': 'keep-alive',
+            'DNT': '1',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Sec-GPC': '1',
+            'Referer': 'https://www.facebook.com/',
+        }
         
         self.base_opts = {
             'format': 'best[ext=mp4]/best',
@@ -78,15 +94,7 @@ class SocialMediaDownloader:
         import random
         return random.choice(self.user_agents)
     
-    def fix_facebook_url_scheme(self, url: str) -> str:
-        """Aggiunge https:// se manca (schema incompleto)"""
-        if url.startswith('//'):
-            return 'https:' + url
-        elif not url.startswith('http'):
-            return 'https://' + url
-        return url
-    
-    def get_ydl_opts(self, url: str, attempt: int = 0) -> Dict:
+    def get_ydl_opts(self, url: str, attempt: int = 0, platform: str = 'generic') -> Dict:
         """Ottiene opzioni yt-dlp per piattaforma"""
         opts = self.base_opts.copy()
         
@@ -98,13 +106,13 @@ class SocialMediaDownloader:
         }
         
         # Instagram
-        if 'instagram' in url.lower():
+        if platform == 'instagram' or 'instagram' in url.lower():
             if os.path.exists(self.instagram_cookies):
                 opts['cookiefile'] = self.instagram_cookies
                 logger.info("Instagram: usando cookies")
         
         # YouTube
-        if 'youtube' in url.lower() or 'youtu.be' in url.lower():
+        if platform == 'youtube' or 'youtube' in url.lower() or 'youtu.be' in url.lower():
             opts['match_filters'] = ['duration<=60']
             
             if attempt == 0 and os.path.exists(self.youtube_cookies):
@@ -116,160 +124,27 @@ class SocialMediaDownloader:
                 'Origin': 'https://www.youtube.com',
             })
         
+        # Facebook: usa TUTTI gli header corretti per evitare 400
+        if platform == 'facebook' or 'facebook' in url.lower():
+            # Copia i facebook_headers completi
+            opts['http_headers'] = self.facebook_headers.copy()
+            # Randomizza User-Agent per questo header
+            opts['http_headers']['User-Agent'] = self.get_random_user_agent()
+            
+            # Usa formato generico per evitare parsing bug
+            opts['format'] = 'best/worst'
+            opts['socket_timeout'] = 45
+            
+            logger.info("Facebook: usando headers completi")
+        
         # TikTok
-        if 'tiktok' in url.lower():
+        if platform == 'tiktok' or 'tiktok' in url.lower():
             opts['http_headers'].update({
                 'Referer': 'https://www.tiktok.com/',
                 'Origin': 'https://www.tiktok.com',
             })
         
         return opts
-    
-    async def extract_facebook_direct(self, url: str) -> Optional[Dict]:
-        """Estrae video Facebook direttamente"""
-        try:
-            logger.info(f"Facebook direct extraction: {url}")
-            
-            headers = {
-                'User-Agent': self.get_random_user_agent(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Referer': 'https://www.facebook.com/',
-            }
-            
-            loop = asyncio.get_event_loop()
-            
-            def _extract():
-                try:
-                    # Risolvi URL /share/ prima
-                    final_url = url
-                    if '/share/' in url.lower():
-                        try:
-                            response = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
-                            final_url = response.url
-                            logger.info(f"URL /share/ risolto: {final_url}")
-                        except:
-                            pass
-                    
-                    # Scarica la pagina
-                    response = requests.get(final_url, headers=headers, timeout=15)
-                    response.raise_for_status()
-                    
-                    html = response.text
-                    
-                    # Patterns per trovare il video
-                    video_patterns = [
-                        # Pattern 1: video_url
-                        r'"video_url":"([^"]+\.mp4[^"]*)"',
-                        r'"video_url":"([^"\\]+(?:\\/[^"\\]*)?)"',
-                        
-                        # Pattern 2: src per video
-                        r'"src":"(https?://[^"]+\.mp4[^"]*)"',
-                        r'"src":"(//[^"]+\.mp4[^"]*)"',
-                        
-                        # Pattern 3: URL generico
-                        r'"url":"(https?://[^"]+\.mp4[^"]*)"',
-                        r'"url":"(//[^"]+\.mp4[^"]*)"',
-                        
-                        # Pattern 4: Direct video element
-                        r'<video[^>]+src="([^"]+\.mp4)"',
-                        r'<source[^>]+src="([^"]+\.mp4)"',
-                    ]
-                    
-                    for pattern in video_patterns:
-                        matches = re.findall(pattern, html)
-                        if matches:
-                            video_url = matches[0]
-                            
-                            # Unescape URL
-                            video_url = video_url.replace('\\/', '/').replace('\\', '')
-                            
-                            # FIX: Aggiungi https:// se manca
-                            video_url = self._fix_url_scheme(video_url)
-                            
-                            # Valida URL
-                            if video_url.startswith('http'):
-                                logger.info(f"Trovato video URL: {video_url[:80]}...")
-                                
-                                return {
-                                    'url': video_url,
-                                    'title': 'Facebook Reel',
-                                    'uploader': 'Facebook User',
-                                    'duration': 0,
-                                }
-                    
-                    logger.warning("Nessun video trovato nella pagina")
-                    return None
-                
-                except Exception as e:
-                    logger.error(f"Facebook extraction error: {e}")
-                    return None
-            
-            result = await loop.run_in_executor(None, _extract)
-            return result
-        
-        except Exception as e:
-            logger.error(f"Facebook extraction failed: {e}")
-            return None
-    
-    def _fix_url_scheme(self, url: str) -> str:
-        """Fissa URL senza schema"""
-        url = url.strip()
-        
-        # Se inizia con //, aggiungi https:
-        if url.startswith('//'):
-            url = 'https:' + url
-        
-        # Se non ha schema, aggiungi https://
-        elif not url.startswith('http'):
-            url = 'https://' + url
-        
-        return url
-    
-    async def download_facebook_direct(self, video_url: str) -> Optional[str]:
-        """Scarica video Facebook direttamente"""
-        try:
-            logger.info(f"Scaricando video Facebook...")
-            
-            # Fissa URL se necessario
-            video_url = self._fix_url_scheme(video_url)
-            
-            headers = {
-                'User-Agent': self.get_random_user_agent(),
-                'Referer': 'https://www.facebook.com/',
-                'Range': 'bytes=0-',
-            }
-            
-            loop = asyncio.get_event_loop()
-            
-            def _download():
-                try:
-                    response = requests.get(video_url, headers=headers, timeout=30, stream=True)
-                    response.raise_for_status()
-                    
-                    # Salva il file
-                    filename = os.path.join(
-                        self.temp_dir,
-                        f'facebook_video_{int(__import__("time").time())}.mp4'
-                    )
-                    
-                    with open(filename, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                    
-                    logger.info(f"Facebook video salvato: {filename}")
-                    return filename
-                
-                except Exception as e:
-                    logger.error(f"Errore download Facebook: {e}")
-                    return None
-            
-            result = await loop.run_in_executor(None, _download)
-            return result
-        
-        except Exception as e:
-            logger.error(f"Facebook download error: {e}")
-            return None
     
     async def download_video(self, url: str) -> Dict:
         """Download principale"""
@@ -283,45 +158,24 @@ class SocialMediaDownloader:
                     'error': '📸 Questo è un POST/FOTO Instagram, non un video!'
                 }
         
-        # SPECIAL HANDLING per Facebook
-        if 'facebook' in url.lower():
-            logger.info("Facebook detected - using direct extraction method")
-            
-            # Prova metodo diretto
-            info = await self.extract_facebook_direct(url)
-            if info:
-                file_path = await self.download_facebook_direct(info['url'])
-                if file_path and os.path.exists(file_path):
-                    return {
-                        'success': True,
-                        'file_path': file_path,
-                        'title': info.get('title', 'Facebook Reel'),
-                        'uploader': info.get('uploader', 'Facebook User'),
-                        'duration': info.get('duration', 0),
-                        'platform': 'facebook',
-                        'url': url
-                    }
-            
-            # Se fallisce
-            return {
-                'success': False,
-                'error': '⚠️ Reel Facebook non disponibile. Potrebbe essere privato o protetto.'
-            }
+        # Determina piattaforma
+        platform = self.detect_platform(url)
         
-        # Per altre piattaforme: retry loop standard
+        # Pulisci URL (risolvi redirect /share/)
+        clean_url = await self.clean_url_async(url)
+        logger.info(f"URL finale: {clean_url}")
+        
+        # Retry loop per tutte le piattaforme
         for attempt in range(self.max_retries):
             try:
-                clean_url = self.clean_url(url)
-                platform = self.detect_platform(clean_url)
-                
-                logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}")
+                logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}: {clean_url}")
                 
                 # Estrai info
-                info = await self.extract_info(clean_url, attempt)
+                info = await self.extract_info(clean_url, attempt, platform)
                 if not info:
                     if attempt < self.max_retries - 1:
                         delay = self.retry_delay * (2 ** attempt)
-                        logger.info(f"Retry {attempt + 1} dopo {delay}s")
+                        logger.info(f"Retry info {attempt + 1} dopo {delay}s")
                         await asyncio.sleep(delay)
                         continue
                     else:
@@ -331,11 +185,11 @@ class SocialMediaDownloader:
                         }
                 
                 # Download
-                file_path = await self.download_with_ytdlp(clean_url, attempt)
+                file_path = await self.download_with_ytdlp(clean_url, attempt, platform)
                 if not file_path or not os.path.exists(file_path):
                     if attempt < self.max_retries - 1:
                         delay = self.retry_delay * (2 ** attempt)
-                        logger.info(f"Download retry {attempt + 1} dopo {delay}s")
+                        logger.info(f"Retry download {attempt + 1} dopo {delay}s")
                         await asyncio.sleep(delay)
                         continue
                     else:
@@ -373,6 +227,8 @@ class SocialMediaDownloader:
                         'success': False,
                         'error': '🔒 Video privato o inaccessibile.'
                     }
+                elif '400' in error_str or 'bad request' in error_str:
+                    logger.warning("HTTP 400 Bad Request - Facebook blocking? Retrying...")
                 
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
@@ -383,13 +239,66 @@ class SocialMediaDownloader:
             'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'
         }
     
+    async def clean_url_async(self, url: str) -> str:
+        """Pulisce URL e risolve redirect (async)"""
+        url = url.strip()
+        
+        # Facebook /share/ - risolvi redirect
+        if 'facebook.com/share/' in url.lower():
+            try:
+                loop = asyncio.get_event_loop()
+                
+                def _resolve():
+                    try:
+                        response = requests.head(
+                            url,
+                            allow_redirects=True,
+                            timeout=10,
+                            headers=self.facebook_headers
+                        )
+                        return response.url
+                    except:
+                        return url
+                
+                url = await loop.run_in_executor(None, _resolve)
+                logger.info(f"URL /share/ risolto a: {url}")
+            except:
+                pass
+        
+        # TikTok short URLs
+        if 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
+            try:
+                loop = asyncio.get_event_loop()
+                
+                def _resolve_tiktok():
+                    try:
+                        response = requests.head(
+                            url,
+                            allow_redirects=True,
+                            timeout=10,
+                            headers={'User-Agent': self.get_random_user_agent()}
+                        )
+                        return response.url
+                    except:
+                        return url
+                
+                url = await loop.run_in_executor(None, _resolve_tiktok)
+            except:
+                pass
+        
+        # Rimuovi parametri query
+        if '?' in url:
+            url = url.split('?')[0]
+        
+        return url
+    
     async def check_if_video(self, url: str) -> bool:
         """Verifica se è video Instagram"""
         try:
             loop = asyncio.get_event_loop()
             
             def _check():
-                opts = self.get_ydl_opts(url)
+                opts = self.get_ydl_opts(url, platform='instagram')
                 opts['skip_download'] = True
                 
                 with yt_dlp.YoutubeDL(opts) as ydl:
@@ -401,10 +310,10 @@ class SocialMediaDownloader:
         except:
             return True
     
-    async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
+    async def extract_info(self, url: str, attempt: int = 0, platform: str = 'generic') -> Optional[Dict]:
         """Estrai info video"""
         try:
-            opts = self.get_ydl_opts(url, attempt)
+            opts = self.get_ydl_opts(url, attempt, platform)
             opts['skip_download'] = True
             
             loop = asyncio.get_event_loop()
@@ -420,9 +329,9 @@ class SocialMediaDownloader:
             logger.error(f"Extract info attempt {attempt}: {str(e)[:200]}")
             
             # Fallback per YouTube
-            if 'youtube' in url.lower() and attempt < 2:
+            if platform == 'youtube' and attempt < 2:
                 try:
-                    opts = self.get_ydl_opts(url, attempt + 1)
+                    opts = self.get_ydl_opts(url, attempt + 1, 'youtube')
                     opts['skip_download'] = True
                     
                     loop = asyncio.get_event_loop()
@@ -438,10 +347,10 @@ class SocialMediaDownloader:
             
             return None
     
-    async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
+    async def download_with_ytdlp(self, url: str, attempt: int = 0, platform: str = 'generic') -> Optional[str]:
         """Download con yt-dlp"""
         try:
-            opts = self.get_ydl_opts(url, attempt)
+            opts = self.get_ydl_opts(url, attempt, platform)
             loop = asyncio.get_event_loop()
             
             def _download():
@@ -458,7 +367,7 @@ class SocialMediaDownloader:
             
             # Cerca con estensioni alternative
             base = os.path.splitext(filename)[0]
-            for ext in ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.flv']:
+            for ext in ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.flv', '.m4v']:
                 test_file = base + ext
                 if os.path.exists(test_file):
                     return test_file
@@ -468,42 +377,6 @@ class SocialMediaDownloader:
         except Exception as e:
             logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
             return None
-    
-    def clean_url(self, url: str) -> str:
-        """Pulisce URL"""
-        url = url.strip()
-        
-        # Facebook /share/
-        if 'facebook.com/share/' in url:
-            try:
-                response = requests.head(
-                    url,
-                    allow_redirects=True,
-                    timeout=10,
-                    headers={'User-Agent': self.get_random_user_agent()}
-                )
-                url = response.url
-            except:
-                pass
-        
-        # TikTok short URLs
-        if 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
-            try:
-                response = requests.head(
-                    url,
-                    allow_redirects=True,
-                    timeout=10,
-                    headers={'User-Agent': self.get_random_user_agent()}
-                )
-                url = response.url
-            except:
-                pass
-        
-        # Rimuovi parametri
-        if '?' in url:
-            url = url.split('?')[0]
-        
-        return url
     
     def detect_platform(self, url: str) -> str:
         """Rileva piattaforma"""
@@ -518,7 +391,7 @@ class SocialMediaDownloader:
             return 'youtube'
         elif 'twitter' in url_lower or 'x.com' in url_lower:
             return 'twitter'
-        return 'unknown'
+        return 'generic'
     
     def get_error_message_for_platform(self, platform: str, error_type: str) -> str:
         """Messaggio errore per piattaforma"""
@@ -534,6 +407,10 @@ class SocialMediaDownloader:
             'tiktok': {
                 'extraction_failed': '⚠️ Errore nel caricamento da TikTok.',
                 'download_failed': '🔒 Video TikTok non disponibile.',
+            },
+            'facebook': {
+                'extraction_failed': '⚠️ Reel Facebook non disponibile. Riprova.',
+                'download_failed': '🔒 Non riesco a scaricare il reel. Potrebbe essere privato.',
             },
         }
         
