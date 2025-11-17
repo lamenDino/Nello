@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v4.0 - CAROSELLI SUPPORT + ALBUM TELEGRAM
-- Estrae foto dai caroselli Instagram/TikTok
-- Invia come album Telegram (media_group)
-- Supporto video dai caroselli
-- Fallback a singoli file se album non supportato
+Social Media Downloader v4.1 FINAL - FACEBOOK BACK TO YT-DLP
+- Facebook: Ritorna a yt-dlp (ma con workaround per bug)
+- Usa --no-check-certificates e --socket-timeout aumentato
+- Caroselli Instagram/TikTok completi
+- Fallback intelligente se yt-dlp fallisce
 """
 
 import os
@@ -38,24 +38,6 @@ class SocialMediaDownloader:
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1',
         ]
-        
-        # Headers per Facebook
-        self.facebook_headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Cache-Control': 'max-age=0',
-            'Connection': 'keep-alive',
-            'DNT': '1',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Sec-GPC': '1',
-            'Referer': 'https://www.facebook.com/',
-        }
         
         self.base_opts = {
             'format': 'best[ext=mp4]/best',
@@ -96,35 +78,28 @@ class SocialMediaDownloader:
         return random.choice(self.user_agents)
     
     def validate_and_detect_unsupported(self, url: str) -> Tuple[bool, Optional[str], bool]:
-        """
-        Valida URL e rileva tipi non supportati
-        Returns: (is_valid, error_message, is_carousel)
-        """
+        """Valida URL e rileva tipi non supportati"""
         url_lower = url.lower()
         
-        # TikTok: caroselli di foto (/photo/) → SUPPORTATI in v4.0
+        # TikTok: caroselli foto - SUPPORTATI
         if 'tiktok' in url_lower and '/photo/' in url_lower:
-            return True, None, True  # is_carousel=True
+            return True, None, True
         
         # TikTok: collezioni
         if 'tiktok' in url_lower and '/collection/' in url_lower:
-            return False, '📚 Collezione TikTok non supportata. Carica singoli video.', False
+            return False, '📚 Collezione TikTok non supportata.', False
         
-        # Instagram: caroselli (/carousel/) → SUPPORTATI in v4.0
+        # Instagram: caroselli - SUPPORTATI
         if 'instagram' in url_lower and ('/carousel/' in url_lower or 'carousel' in url_lower):
-            return True, None, True  # is_carousel=True
-        
-        # Instagram: foto singola (/p/ ma senza video)
-        if 'instagram' in url_lower and '/p/' in url_lower:
-            pass  # Verrà controllato dopo
+            return True, None, True
         
         # YouTube: playlist
         if 'youtube' in url_lower and 'playlist' in url_lower:
-            return False, '📺 Playlist YouTube non supportate. Carica singoli video/shorts.', False
+            return False, '📺 Playlist YouTube non supportate.', False
         
         # YouTube: channel
-        if 'youtube' in url_lower and url_lower.endswith('/@') or '/channel/' in url_lower:
-            return False, '📺 Channel YouTube non supportato. Carica singoli video/shorts.', False
+        if 'youtube' in url_lower and (url_lower.endswith('/@') or '/channel/' in url_lower):
+            return False, '📺 Channel YouTube non supportato.', False
         
         # Facebook: OK
         if 'facebook' in url_lower or 'fb.' in url_lower:
@@ -132,7 +107,7 @@ class SocialMediaDownloader:
         
         # URL vuoto
         if not url or len(url) < 10:
-            return False, '❌ URL non valido o troppo corto.', False
+            return False, '❌ URL non valido.', False
         
         return True, None, False
     
@@ -146,13 +121,12 @@ class SocialMediaDownloader:
             def _extract():
                 try:
                     opts = self.base_opts.copy()
-                    opts['extract_flat'] = 'in_playlist'  # Estrai playlist/carosello
+                    opts['extract_flat'] = 'in_playlist'
                     opts['quiet'] = True
                     
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         info = ydl.extract_info(url, download=False)
                         
-                        # Se è una playlist/carosello
                         if 'entries' in info:
                             urls = []
                             for item in info['entries']:
@@ -174,13 +148,13 @@ class SocialMediaDownloader:
             return None
     
     async def download_carousel_items(self, carousel_urls: List[str]) -> Optional[List[Dict]]:
-        """Scarica tutti i file del carosello e ritorna lista di file paths con tipo"""
+        """Scarica tutti i file del carosello"""
         try:
             logger.info(f"Download {len(carousel_urls)} item da carosello...")
             
             files = []
             
-            for idx, item_url in enumerate(carousel_urls[:10]):  # Max 10 item per album Telegram
+            for idx, item_url in enumerate(carousel_urls[:10]):
                 try:
                     logger.info(f"Scaricando item {idx + 1}/{len(carousel_urls)}")
                     
@@ -202,10 +176,7 @@ class SocialMediaDownloader:
                             
                             if os.path.exists(filename):
                                 file_type = 'video' if is_video else 'photo'
-                                files.append({
-                                    'path': filename,
-                                    'type': file_type
-                                })
+                                files.append({'path': filename, 'type': file_type})
                                 logger.info(f"Item {idx + 1} scaricato: {file_type}")
                         except Exception as e:
                             logger.warning(f"Errore download item {idx + 1}: {e}")
@@ -248,12 +219,22 @@ class SocialMediaDownloader:
             
             if attempt == 0 and os.path.exists(self.youtube_cookies):
                 opts['cookiefile'] = self.youtube_cookies
-                logger.info("YouTube: usando cookies")
             
             opts['http_headers'].update({
                 'Referer': 'https://www.youtube.com/',
                 'Origin': 'https://www.youtube.com',
             })
+        
+        # Facebook: Opzioni speciali per evitare bug
+        if platform == 'facebook' or 'facebook' in url.lower():
+            opts['format'] = 'best/worst'
+            opts['socket_timeout'] = 60  # Timeout più lungo
+            opts['no_check_certificates'] = True
+            opts['http_headers'].update({
+                'Referer': 'https://www.facebook.com/',
+                'Origin': 'https://www.facebook.com',
+            })
+            logger.info("Facebook: opzioni speciali yt-dlp attivate")
         
         # TikTok
         if platform == 'tiktok' or 'tiktok' in url.lower():
@@ -264,126 +245,19 @@ class SocialMediaDownloader:
         
         return opts
     
-    async def extract_facebook_video_url(self, url: str) -> Optional[str]:
-        """Estrae direttamente il video URL da Facebook senza yt-dlp"""
-        try:
-            logger.info(f"Facebook direct extraction: {url}")
-            
-            loop = asyncio.get_event_loop()
-            
-            def _extract():
-                try:
-                    response = requests.get(
-                        url,
-                        headers=self.facebook_headers,
-                        timeout=15,
-                        allow_redirects=True
-                    )
-                    response.raise_for_status()
-                    
-                    html = response.text
-                    
-                    patterns = [
-                        r'<source[^>]+src="([^"]+\.mp4[^"]*)"',
-                        r'<video[^>]+src="([^"]+\.mp4)"',
-                        r'"src":"(https?://[^"]+\.mp4[^"]*)"',
-                        r'"url":"(https?://[^"]+\.mp4[^"]*)"',
-                        r'"video_url":"(https?://[^"]+\.mp4[^"]*)"',
-                        r'"hd_src":"(https?://[^"]+\.mp4[^"]*)"',
-                        r'"src":"(//[^"]+\.mp4[^"]*)"',
-                        r'"url":"(//[^"]+\.mp4[^"]*)"',
-                        r'"video_url":"(//[^"]+\.mp4[^"]*)"',
-                    ]
-                    
-                    for pattern in patterns:
-                        matches = re.findall(pattern, html)
-                        if matches:
-                            for video_url in matches:
-                                video_url = video_url.replace('\\/', '/').replace('\\', '')
-                                
-                                if video_url.startswith('//'):
-                                    video_url = 'https:' + video_url
-                                elif not video_url.startswith('http'):
-                                    video_url = 'https://' + video_url
-                                
-                                if video_url.startswith('http') and '.mp4' in video_url:
-                                    logger.info(f"Trovato video URL: {video_url[:80]}...")
-                                    return video_url
-                    
-                    logger.warning("Nessun video trovato con regex")
-                    return None
-                
-                except Exception as e:
-                    logger.error(f"Errore extraction: {e}")
-                    return None
-            
-            result = await loop.run_in_executor(None, _extract)
-            return result
-        
-        except Exception as e:
-            logger.error(f"Facebook extraction failed: {e}")
-            return None
-    
-    async def download_facebook_video(self, video_url: str) -> Optional[str]:
-        """Scarica il video Facebook direttamente"""
-        try:
-            logger.info(f"Scaricando video Facebook...")
-            
-            loop = asyncio.get_event_loop()
-            
-            def _download():
-                try:
-                    response = requests.get(
-                        video_url,
-                        headers=self.facebook_headers,
-                        timeout=60,
-                        stream=True
-                    )
-                    response.raise_for_status()
-                    
-                    filename = os.path.join(
-                        self.temp_dir,
-                        f'facebook_video_{int(__import__("time").time())}.mp4'
-                    )
-                    
-                    with open(filename, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                    
-                    logger.info(f"Video salvato: {filename}")
-                    return filename
-                
-                except Exception as e:
-                    logger.error(f"Errore download: {e}")
-                    return None
-            
-            result = await loop.run_in_executor(None, _download)
-            return result
-        
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return None
-    
     async def download_video(self, url: str) -> Dict:
         """Download principale"""
         
-        # VALIDAZIONE URL
+        # VALIDAZIONE
         is_valid, error_msg, is_carousel = self.validate_and_detect_unsupported(url)
         if not is_valid:
-            return {
-                'success': False,
-                'error': error_msg
-            }
+            return {'success': False, 'error': error_msg}
         
-        # Controlla foto Instagram
+        # Foto Instagram check
         if 'instagram' in url.lower() and '/p/' in url.lower() and not is_carousel:
             is_video = await self.check_if_video(url)
             if not is_video:
-                return {
-                    'success': False,
-                    'error': '📸 Questo è un POST/FOTO Instagram, non un video!'
-                }
+                return {'success': False, 'error': '📸 Questo è un POST/FOTO Instagram!'}
         
         # Determina piattaforma
         platform = self.detect_platform(url)
@@ -392,9 +266,9 @@ class SocialMediaDownloader:
         clean_url = await self.clean_url_async(url)
         logger.info(f"URL finale: {clean_url}")
         
-        # CAROSELLO: Estrai e scarica tutti gli item
+        # CAROSELLO
         if is_carousel:
-            logger.info("Rilevato carosello - estrazione items...")
+            logger.info("Carosello rilevato - estrazione items...")
             
             carousel_urls = await self.extract_carousel_items(clean_url)
             if carousel_urls:
@@ -403,7 +277,7 @@ class SocialMediaDownloader:
                     return {
                         'success': True,
                         'file_path': None,
-                        'files': carousel_files,  # Lista di dict {path, type}
+                        'files': carousel_files,
                         'title': f'Carosello ({len(carousel_files)} item)',
                         'uploader': 'Carosello',
                         'duration': 0,
@@ -412,35 +286,9 @@ class SocialMediaDownloader:
                         'is_carousel': True
                     }
             
-            return {
-                'success': False,
-                'error': '⚠️ Errore nell\'estrazione del carosello. Riprova.'
-            }
+            return {'success': False, 'error': '⚠️ Errore estrazione carosello.'}
         
-        # FACEBOOK: Direct extraction
-        if platform == 'facebook':
-            logger.info("Facebook - usando direct extraction")
-            
-            video_url = await self.extract_facebook_video_url(clean_url)
-            if video_url:
-                file_path = await self.download_facebook_video(video_url)
-                if file_path and os.path.exists(file_path):
-                    return {
-                        'success': True,
-                        'file_path': file_path,
-                        'title': 'Facebook Reel',
-                        'uploader': 'Facebook User',
-                        'duration': 0,
-                        'platform': 'facebook',
-                        'url': clean_url
-                    }
-            
-            return {
-                'success': False,
-                'error': '⚠️ Reel Facebook non disponibile. Potrebbe essere privato.'
-            }
-        
-        # Per altre piattaforme: usa yt-dlp standard
+        # DOWNLOAD STANDARD (yt-dlp per tutti, incluso Facebook v4.1!)
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}")
@@ -454,10 +302,7 @@ class SocialMediaDownloader:
                         await asyncio.sleep(delay)
                         continue
                     else:
-                        return {
-                            'success': False,
-                            'error': self.get_error_message_for_platform(platform, 'extraction_failed')
-                        }
+                        return {'success': False, 'error': self.get_error_message_for_platform(platform, 'extraction_failed')}
                 
                 # Download
                 file_path = await self.download_with_ytdlp(clean_url, attempt, platform)
@@ -468,10 +313,7 @@ class SocialMediaDownloader:
                         await asyncio.sleep(delay)
                         continue
                     else:
-                        return {
-                            'success': False,
-                            'error': self.get_error_message_for_platform(platform, 'download_failed')
-                        }
+                        return {'success': False, 'error': self.get_error_message_for_platform(platform, 'download_failed')}
                 
                 # Estrai uploader
                 uploader = info.get('uploader', 'Sconosciuto')
@@ -493,24 +335,15 @@ class SocialMediaDownloader:
                 logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
                 
                 if 'sign in' in error_str or 'bot' in error_str:
-                    return {
-                        'success': False,
-                        'error': '🤖 YouTube chiede autenticazione. Riprova tra poco.'
-                    }
+                    return {'success': False, 'error': '🤖 YouTube chiede autenticazione.'}
                 elif 'no video formats found' in error_str:
-                    return {
-                        'success': False,
-                        'error': '🔒 Video privato o inaccessibile.'
-                    }
+                    return {'success': False, 'error': '🔒 Video privato o inaccessibile.'}
                 
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
         
-        return {
-            'success': False,
-            'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'
-        }
+        return {'success': False, 'error': 'Download fallito. Riprova più tardi.'}
     
     async def clean_url_async(self, url: str) -> str:
         """Pulisce URL e risolve redirect"""
@@ -522,12 +355,7 @@ class SocialMediaDownloader:
                 
                 def _resolve():
                     try:
-                        response = requests.head(
-                            url,
-                            allow_redirects=True,
-                            timeout=10,
-                            headers=self.facebook_headers
-                        )
+                        response = requests.head(url, allow_redirects=True, timeout=10)
                         return response.url
                     except:
                         return url
@@ -542,12 +370,7 @@ class SocialMediaDownloader:
                 
                 def _resolve_tiktok():
                     try:
-                        response = requests.head(
-                            url,
-                            allow_redirects=True,
-                            timeout=10,
-                            headers={'User-Agent': self.get_random_user_agent()}
-                        )
+                        response = requests.head(url, allow_redirects=True, timeout=10)
                         return response.url
                     except:
                         return url
@@ -634,7 +457,7 @@ class SocialMediaDownloader:
                 return filename
             
             base = os.path.splitext(filename)[0]
-            for ext in ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.flv', '.m4v', '.jpg', '.png', '.jpeg']:
+            for ext in ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.flv', '.m4v', '.jpg', '.png']:
                 test_file = base + ext
                 if os.path.exists(test_file):
                     return test_file
@@ -664,16 +487,20 @@ class SocialMediaDownloader:
         """Messaggio errore per piattaforma"""
         messages = {
             'youtube': {
-                'extraction_failed': '🤖 YouTube chiede autenticazione. Riprova tra poco.',
-                'download_failed': '⚠️ Non riesco a scaricare lo short. Riprova.',
+                'extraction_failed': '🤖 YouTube chiede autenticazione.',
+                'download_failed': '⚠️ Non riesco a scaricare lo short.',
             },
             'instagram': {
                 'extraction_failed': '🔒 Post privato o cookies scaduti.',
-                'download_failed': '📸 Non riesco a scaricare il video Instagram.',
+                'download_failed': '📸 Non riesco a scaricare il video.',
             },
             'tiktok': {
                 'extraction_failed': '⚠️ Video TikTok non disponibile.',
                 'download_failed': '🔒 Video TikTok non disponibile.',
+            },
+            'facebook': {
+                'extraction_failed': '⚠️ Reel Facebook non disponibile.',
+                'download_failed': '🔒 Reel Facebook non disponibile.',
             },
         }
         
