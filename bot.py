@@ -1,195 +1,225 @@
 #!/usr/bin/env python3
 """
-Telegram Multi-Platform Video Downloader Bot v3.0
-- Supporta: TikTok, Instagram (reels + posts + storie), Facebook (video + reels), YouTube (shorts)
-- Formattazione bella con emoji e nome utente reale
-- Gestione errori migliorata
+Telegram Bot v4.0 - Social Media Downloader
+- Supporto caroselli Instagram/TikTok
+- Album Telegram per caroselli
+- Formattazione con emoji + nome utente
+- Video/foto da tutti i social
 """
 
-import os
 import logging
-import threading
 import asyncio
-from aiohttp import web
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.helpers import escape
+import os
+from pathlib import Path
+
+from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from dotenv import load_dotenv
+from telegram.error import TelegramError
+
 from social_downloader import SocialMediaDownloader
 
-load_dotenv()
-
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-PORT = int(os.getenv('PORT', '8080'))
-
+# Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Emoji per piattaforme
-PLATFORM_EMOJI = {
-    'tiktok': '🎵',
-    'instagram': '📷',
-    'facebook': '👍',
-    'youtube': '▶️',
-    'twitter': '🐦',
-}
+# Carica variabili ambiente
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN non trovato nelle variabili ambiente")
 
-def is_supported_link(url: str) -> bool:
-    """Verifica se il link è di una piattaforma supportata"""
-    domains = [
-        'tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com', 'm.tiktok.com',
-        'instagram.com', 'ig.tv', 'instagram.tv',
-        'facebook.com', 'fb.watch', 'fb.com',
-        'youtube.com', 'youtu.be',
-        'twitter.com', 'x.com'
-    ]
-    return any(d in url for d in domains)
+# Inizializza downloader
+downloader = SocialMediaDownloader()
 
-def detect_platform(url: str) -> str:
-    """Rileva la piattaforma dal URL"""
-    url_lower = url.lower()
-    if 'tiktok' in url_lower:
-        return 'TikTok'
-    elif 'instagram' in url_lower or 'ig.tv' in url_lower:
-        return 'Instagram'
-    elif 'facebook' in url_lower or 'fb.' in url_lower:
-        return 'Facebook'
-    elif 'youtube' in url_lower or 'youtu.be' in url_lower:
-        return 'YouTube'
-    elif 'twitter' in url_lower or 'x.com' in url_lower:
-        return 'Twitter'
-    return 'Sconosciuta'
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start"""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler comando /start"""
     user = update.effective_user
-    message = (
-        f"👋 Ciao {user.first_name}!\n\n"
-        "Sono il bot per scaricare video da:\n"
-        "🎵 TikTok\n"
-        "📷 Instagram (Reels, Posts, Storie)\n"
-        "👍 Facebook (Video, Reels, Reel /share/)\n"
-        "▶️ YouTube (Solo Shorts)\n"
-        "🐦 Twitter/X\n\n"
-        "Inviami semplicemente il link di un video! 🚀"
+    await update.message.reply_text(
+        f"🎬 Ciao {user.first_name}! Sono un bot per scaricare video dai social.\n\n"
+        f"📝 Supporto:\n"
+        f"✅ Instagram - Reels, Posts, Caroselli\n"
+        f"✅ TikTok - Video, Caroselli foto\n"
+        f"✅ YouTube - Shorts, Video\n"
+        f"✅ Facebook - Reels, Video\n"
+        f"✅ Twitter - Video\n\n"
+        f"📎 Invia un link e scarico il video/foto per te!"
     )
-    await update.message.reply_text(message)
 
-async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler per il download dei video"""
-    msg = update.message
-    url = msg.text.strip()
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler comando /help"""
+    await update.message.reply_text(
+        f"🆘 Come usare il bot:\n\n"
+        f"1️⃣ Invia un link di un video o foto dai social\n"
+        f"2️⃣ Aspetta che il bot scarichi il file\n"
+        f"3️⃣ Ricevi il video/foto formattato\n\n"
+        f"📌 Formati supportati:\n"
+        f"🎥 Video singoli\n"
+        f"📸 Foto singole\n"
+        f"🖼️ Caroselli (album Telegram)\n\n"
+        f"⏱️ Il download può richiedere da pochi secondi a 1 minuto"
+    )
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler per i link inviati"""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    message = update.message
+    url = message.text.strip()
     
-    if not is_supported_link(url):
+    # Controllo URL valido
+    if not url.startswith(('http://', 'https://')):
+        await message.reply_text("❌ URL non valido. Invia un link che inizia con http:// o https://")
         return
     
-    # Messaggio di caricamento
-    loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
-    
-    dl = SocialMediaDownloader()
+    # Messaggio di attesa
+    loading_msg = await message.reply_text("⏳ Scaricamento in corso...")
     
     try:
-        info = await dl.download_video(url)
+        # Download
+        result = await downloader.download_video(url)
         
-        if info['success']:
-            # Cancella il messaggio originale
-            try:
-                await msg.delete()
-            except:
-                pass
+        if not result['success']:
+            await loading_msg.edit_text(result['error'])
+            return
+        
+        # Estrai informazioni
+        title = result.get('title', 'Video')
+        uploader = result.get('uploader', 'Sconosciuto')
+        platform = result.get('platform', 'unknown')
+        
+        # Emoji per piattaforma
+        emoji_map = {
+            'instagram': '📷',
+            'tiktok': '🎵',
+            'youtube': '▶️',
+            'facebook': '👍',
+            'twitter': '🐦',
+            'unknown': '📹'
+        }
+        platform_emoji = emoji_map.get(platform, '📹')
+        
+        # Formattazione messaggio
+        caption = (
+            f"{platform_emoji} **Video da: {platform.capitalize()}**\n"
+            f"👤 Video inviato da: **{uploader}**\n"
+            f"🔗 Link originale: {url}\n"
+            f"📝 Titolo: {title[:100]}"
+        )
+        
+        # CHECK: È un carosello?
+        if result.get('is_carousel'):
+            logger.info(f"Carosello rilevato: {len(result['files'])} item")
             
-            # Estrai info
-            platform = detect_platform(url)
-            emoji = PLATFORM_EMOJI.get(platform.lower(), '📱')
-            uploader = escape(info.get('uploader', 'Sconosciuto'))
-            user_sender = escape(msg.from_user.full_name)
-            title = escape(info.get('title', 'Video scaricato'))
-            orig_link = escape(url)
+            # Prepara media group
+            media_group = []
             
-            # Formatta la caption con emoji e grassetto
-            caption = (
-                f"{emoji} <b>Video da: {platform}</b>\n"
-                f"👤 Video inviato da: <b>{user_sender}</b>\n"
-                f"🔗 Link originale: {orig_link}\n"
-                f"📝 {title}"
-            )
+            for idx, file_info in enumerate(result['files']):
+                file_path = file_info['path']
+                file_type = file_info['type']
+                
+                try:
+                    with open(file_path, 'rb') as file:
+                        if file_type == 'photo':
+                            # Aggiungi caption solo al primo item
+                            media_group.append(
+                                InputMediaPhoto(
+                                    media=file,
+                                    caption=caption if idx == 0 else '',
+                                    parse_mode='Markdown'
+                                )
+                            )
+                        else:  # video
+                            media_group.append(
+                                InputMediaVideo(
+                                    media=file,
+                                    caption=caption if idx == 0 else '',
+                                    parse_mode='Markdown'
+                                )
+                            )
+                except Exception as e:
+                    logger.warning(f"Errore aggiunta file {idx}: {e}")
             
-            # Invia il video
-            with open(info['file_path'], 'rb') as f:
-                await context.bot.send_video(
-                    chat_id=msg.chat_id,
-                    video=f,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
+            # Invia album
+            if media_group:
+                await context.bot.send_media_group(
+                    chat_id=chat_id,
+                    media=media_group
                 )
-            
-            await loading.delete()
-            os.remove(info['file_path'])
-            
+                await loading_msg.delete()
+                logger.info(f"Album Telegram inviato: {len(media_group)} item")
+            else:
+                await loading_msg.edit_text("❌ Errore nell'invio del carosello")
+        
         else:
-            # Errore nel download
-            error_msg = info.get('error', 'Errore sconosciuto')
-            await loading.edit_text(
-                f"❌ <b>Errore nel download</b>\n\n"
-                f"Motivo: <i>{escape(error_msg)}</i>\n\n"
-                f"Possibili cause:\n"
-                f"• Video privato\n"
-                f"• Link non valido\n"
-                f"• Video troppo grande (max 50MB)\n"
-                f"• Problemi temporanei\n\n"
-                f"Riprova tra un momento! 🔄",
-                parse_mode=ParseMode.HTML
-            )
+            # FILE SINGOLO
+            file_path = result['file_path']
+            
+            if not file_path or not os.path.exists(file_path):
+                await loading_msg.edit_text("❌ File non trovato")
+                return
+            
+            # Determina tipo file
+            file_lower = file_path.lower()
+            is_video = any(ext in file_lower for ext in ['.mp4', '.webm', '.mkv', '.mov', '.avi', '.flv'])
+            
+            try:
+                with open(file_path, 'rb') as file:
+                    if is_video:
+                        await context.bot.send_video(
+                            chat_id=chat_id,
+                            video=file,
+                            caption=caption,
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=file,
+                            caption=caption,
+                            parse_mode='Markdown'
+                        )
+                
+                await loading_msg.delete()
+                logger.info(f"File inviato ({platform}): {title}")
+                
+            except TelegramError as e:
+                logger.error(f"Errore Telegram: {e}")
+                await loading_msg.edit_text(f"❌ Errore nell'invio: {str(e)[:100]}")
+            finally:
+                # Pulisci file locale
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
     
     except Exception as e:
-        logger.error(f"Errore durante il download: {e}")
-        await loading.edit_text(
-            f"❌ <b>Errore inatteso</b>\n\n"
-            f"<code>{escape(str(e)[:100])}</code>",
-            parse_mode=ParseMode.HTML
-        )
+        logger.error(f"Errore handler: {e}")
+        await loading_msg.edit_text(f"❌ Errore: {str(e)[:100]}")
 
-async def health(request):
-    """Health check endpoint"""
-    return web.Response(text="OK")
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler errori"""
+    logger.error(f"Update {update} caused error {context.error}")
 
-async def run_web():
-    """Avvia il web server per Render"""
-    app = web.Application()
-    app.add_routes([web.get('/', health)])
+def main() -> None:
+    """Avvia il bot"""
+    logger.info("🤖 Bot Telegram v4.0 in avvio...")
     
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"Web server avviato sulla porta {PORT}")
+    # Crea application
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    await asyncio.Event().wait()
-
-def start_webserver():
-    """Avvia il web server in un thread separato"""
-    asyncio.run(run_web())
-
-def main():
-    """Funzione principale"""
-    # Avvia il web server
-    thread = threading.Thread(target=start_webserver, daemon=True)
-    thread.start()
+    # Aggiungi handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     
-    # Avvia il bot
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler('start', start_cmd))
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        download_handler
-    ))
+    # Error handler
+    application.add_error_handler(error_handler)
     
-    logger.info("Bot avviato...")
-    application.run_polling(drop_pending_updates=True)
+    # Avvia polling
+    logger.info("✅ Bot avviato e in ascolto...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
