@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Telegram Bot v4.3.3 - Add HTTP health check for Render
-- Telegram bot con polling (non webhook)
-- Aggiungi server HTTP per health check (porta 10000)
-- Render non si lamenta di "No open ports detected"
+Telegram Bot v4.3.4 FINAL - NO parse_mode for captions
+- Rimuovi parse_mode='Markdown' dalle caption
+- Le caption vanno in PLAIN TEXT (no formatting)
+- Solo emoji per decorazione
+- RISOLVE "Can't parse entities" definitivamente!
 """
 
 import logging
@@ -34,7 +35,7 @@ if not BOT_TOKEN:
 downloader = SocialMediaDownloader()
 
 def sanitize_caption(text: str, max_length: int = 1024) -> str:
-    """Sanitizza caption per Telegram (rimuove/escapa caratteri problematici)"""
+    """Sanitizza caption per Telegram - PLAIN TEXT (NO Markdown)"""
     if not text:
         return "Video"
     
@@ -65,11 +66,13 @@ def sanitize_caption(text: str, max_length: int = 1024) -> str:
     for char, replacement in problematic_chars.items():
         text = text.replace(char, replacement)
     
-    # Rimuovi URL ma mantieni il link
+    # Rimuovi URL
     text = re.sub(r'https?://[^\s]+', '[link]', text)
     
-    # Escape backtick multipli
-    text = text.replace('```', '`')
+    # Rimuovi caratteri Markdown che causano problemi
+    # Quando parse_mode=None, questi non sono interpretati ma possono causare problemi
+    text = text.replace('`', "'")
+    text = text.replace('```', "'''")
     
     return text.strip()
 
@@ -140,14 +143,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         }
         platform_emoji = emoji_map.get(platform, '📹')
         
-        # Formattazione messaggio
+        # Formattazione messaggio - PLAIN TEXT (NO Markdown)
         caption = (
-            f"{platform_emoji} **Video da: {platform.capitalize()}**\n"
-            f"👤 Video inviato da: **{uploader}**\n"
-            f"📝 Titolo: {title[:100]}"
+            f"{platform_emoji} Video da: {platform.capitalize()}\n"
+            f"👤 Uploader: {uploader}\n"
+            f"📝 {title[:100]}"
         )
         
-        # SANITIZZA CAPTION!
+        # SANITIZZA CAPTION
         caption = sanitize_caption(caption)
         
         # CHECK: È un carosello?
@@ -168,7 +171,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                                 InputMediaPhoto(
                                     media=file,
                                     caption=caption if idx == 0 else '',
-                                    parse_mode='Markdown'
+                                    # NO parse_mode - plain text!
                                 )
                             )
                         else:  # video
@@ -176,7 +179,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                                 InputMediaVideo(
                                     media=file,
                                     caption=caption if idx == 0 else '',
-                                    parse_mode='Markdown'
+                                    # NO parse_mode - plain text!
                                 )
                             )
                 except Exception as e:
@@ -212,14 +215,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                             chat_id=chat_id,
                             video=file,
                             caption=caption,
-                            parse_mode='Markdown'
+                            # NO parse_mode - plain text!
                         )
                     else:
                         await context.bot.send_photo(
                             chat_id=chat_id,
                             photo=file,
                             caption=caption,
-                            parse_mode='Markdown'
+                            # NO parse_mode - plain text!
                         )
                 
                 await loading_msg.delete()
@@ -276,7 +279,7 @@ async def start_http_server():
 
 def main() -> None:
     """Avvia il bot"""
-    logger.info("🤖 Bot Telegram v4.3.3 in avvio...")
+    logger.info("🤖 Bot Telegram v4.3.4 FINAL in avvio...")
     
     # Crea application
     application = Application.builder().token(BOT_TOKEN).build()
