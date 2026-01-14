@@ -3,7 +3,7 @@
 Telegram Multi-Platform Video Downloader Bot v3.2
 - Retry silenzioso totale
 - Ranking settimanale TOP 3 con badge
-- Messaggio automatico ogni sabato ore 20
+- Messaggio automatico ogni sabato ore 20:00 (Europe/Rome)
 """
 
 import os
@@ -33,7 +33,8 @@ load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 PORT = int(os.getenv('PORT', '8080'))
 
-GROUP_CHAT_ID = 214193849  # 👈 ID GRUPPO
+# Gruppo fornito da te
+GROUP_CHAT_ID = 214193849
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -101,7 +102,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await dl.download_video(url)
 
-        # ❌ FALLIMENTO → SILENZIO TOTALE
+        # ❌ FALLIMENTO → SILENZIO TOTALE (non invia messaggi d'errore)
         if not info.get('success'):
             await loading.delete()
             return
@@ -154,7 +155,7 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
     text = "🏆 <b>RANKING SETTIMANALE</b>\n\n"
 
     for i, (user_id, count) in enumerate(sorted_users):
-        badge = BADGES[i]
+        badge = BADGES[i] if i < len(BADGES) else ""
         text += (
             f"{badge} <a href='tg://user?id={user_id}'>Utente</a> "
             f"— <b>{count}</b> video\n"
@@ -203,11 +204,11 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler)
     )
 
-    # SABATO ORE 20:00
-    application.job_queue.run_weekly(
+    # === QUI: ogni sabato alle 20:00 (sabato = 6, mapping sunday=0 ... saturday=6) ===
+    application.job_queue.run_daily(
         weekly_ranking,
         time=time(hour=20, minute=0),
-        days=(5,),
+        days=(6,),
         chat_id=GROUP_CHAT_ID
     )
 
