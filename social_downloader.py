@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v3.3
+Social Media Downloader v3.3 - FIXED per python-telegram-bot 20.8
 - YouTube Shorts: Contorna bot detection con headers e proxy
 - Facebook Reels: Retry con user-agent alternati
 - Instagram: Fix completo con cookies

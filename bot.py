@@ -14,12 +14,13 @@ import os
 import logging
 import asyncio
 import threading
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from collections import defaultdict
 from html import escape
 from aiohttp import web
 
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from config import TOKEN, CHAT_ID
@@ -105,6 +106,13 @@ async def send_weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         
         if not user_downloads:
             logger.info("Nessun download questa settimana")
+            await context.bot.send_message(
+                chat_id=CHAT_ID,
+                text="📊 <b>RANKING SETTIMANALE</b>\n\n"
+                     "Nessun download questa settimana. 😴\n\n"
+                     "Incoraggia i tuoi amici a mandare link! 🚀",
+                parse_mode=ParseMode.HTML
+            )
             return
         
         top_3 = await get_top_3_users()
@@ -152,27 +160,34 @@ async def schedule_weekly_ranking(application: Application):
     while True:
         try:
             now = datetime.now()
+            
             # Calcola il prossimo sabato alle 20:30
-            days_until_saturday = (5 - now.weekday()) % 7  # 5 = sabato
+            # 0=lunedì, 5=sabato
+            days_until_saturday = (5 - now.weekday()) % 7
             
             if days_until_saturday == 0:
                 # Oggi è sabato
                 target_time = time(20, 30, 0)
                 if now.time() < target_time:
-                    # Non è ancora passata l'ora
-                    wait_seconds = (datetime.combine(now.date(), target_time) - now).total_seconds()
+                    # Non è ancora passata l'ora oggi
+                    target_datetime = datetime.combine(now.date(), target_time)
                 else:
                     # È già passata, attendi al prossimo sabato
-                    wait_seconds = (7 * 24 * 3600) - ((now.timestamp() - datetime.combine(now.date(), target_time).timestamp()))
+                    target_datetime = datetime.combine(
+                        now.date() + timedelta(days=7),
+                        target_time
+                    )
             else:
-                # Calcola i secondi fino al prossimo sabato alle 20:30
+                # Calcola il prossimo sabato
                 target_datetime = datetime.combine(
-                    (now + __import__('datetime').timedelta(days=days_until_saturday)).date(),
+                    now.date() + timedelta(days=days_until_saturday),
                     time(20, 30, 0)
                 )
-                wait_seconds = (target_datetime - now).total_seconds()
             
-            logger.info(f"Prossimo ranking tra {wait_seconds/3600:.1f} ore")
+            wait_seconds = (target_datetime - now).total_seconds()
+            hours_wait = wait_seconds / 3600
+            logger.info(f"Prossimo ranking tra {hours_wait:.1f} ore ({target_datetime})")
+            
             await asyncio.sleep(wait_seconds)
             
             # Invia il ranking
