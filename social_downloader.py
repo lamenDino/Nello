@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v4.7
+Social Media Downloader v5.0
 - VIDEO + CAROSELLO FOTO
-- Instagram /p/ (carosello): scarica foto via entries o thumbnails
+- Instagram /p/ (carosello): scarica foto in modo robusto (yt-dlp playlist mode)
 - Retry massimo 2 tentativi, poi STOP (silenzioso lato bot)
 - Fix "File name too long": output corto (no title)
-- TikTok /photo/: prova best-effort a convertirlo in /video/
+- TikTok /photo/: best-effort conversione in /video/
 """
 
 import os
 import re
+import glob
 import asyncio
 import logging
 import tempfile
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List
 
 import yt_dlp
 import requests
@@ -93,14 +94,24 @@ class SocialMediaDownloader:
         # expand redirect
         if "facebook.com/share/" in url:
             try:
-                r = requests.head(url, allow_redirects=True, timeout=10, headers={"User-Agent": self.get_random_user_agent()})
+                r = requests.head(
+                    url,
+                    allow_redirects=True,
+                    timeout=10,
+                    headers={"User-Agent": self.get_random_user_agent()},
+                )
                 url = r.url
             except Exception:
                 pass
 
         if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
             try:
-                r = requests.head(url, allow_redirects=True, timeout=10, headers={"User-Agent": self.get_random_user_agent()})
+                r = requests.head(
+                    url,
+                    allow_redirects=True,
+                    timeout=10,
+                    headers={"User-Agent": self.get_random_user_agent()},
+                )
                 url = r.url
             except Exception:
                 pass
@@ -146,13 +157,11 @@ class SocialMediaDownloader:
 
     async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
         """
-        Metadata robusta: per IG carosello NON deve fallire per assenza formati video.
+        Metadata robusta. Per IG carosello può anche non avere formats video.
         """
         try:
             opts = self.get_ydl_opts(url, attempt)
             opts["skip_download"] = True
-
-            # IMPORTANT: in extract_info NON forzare format video
             opts.pop("format", None)
             opts["ignore_no_formats_error"] = True
 
@@ -168,125 +177,12 @@ class SocialMediaDownloader:
             logger.error(f"Extract info attempt {attempt}: {str(e)[:220]}")
             return None
 
-    def _is_playlist_like(self, info: Dict) -> bool:
-        return isinstance(info, dict) and isinstance(info.get("entries"), list) and len(info.get("entries")) > 0
-
-    def _guess_ext_from_url(self, url: str) -> str:
-        u = (url or "").lower()
-        for ext in (".jpg", ".jpeg", ".png", ".webp"):
-            if ext in u:
-                return "jpg" if ext == ".jpeg" else ext.replace(".", "")
-        return "jpg"
-
-    def _normalize_url(self, u: str) -> str:
-        # elimina query per deduplicare
-        if not u:
-            return ""
-        return u.split("?", 1)[0]
-
-    def _pick_best_thumb_url(self, thumbs: List[Dict]) -> Optional[str]:
-        best = None
-        best_score = -1
-        for t in thumbs:
-            tu = t.get("url")
-            if not tu:
-                continue
-            score = (t.get("width") or 0) * (t.get("height") or 0)
-            if score <= 0:
-                score = t.get("preference") or 0
-            if score > best_score:
-                best_score = score
-                best = tu
-        return best
-
-    async def _download_url_to_file(self, url: str, filename: str) -> bool:
-        try:
-            headers = {"User-Agent": self.get_random_user_agent()}
-            r = requests.get(url, headers=headers, stream=True, timeout=25)
-            r.raise_for_status()
-            with open(filename, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1024 * 256):
-                    if chunk:
-                        f.write(chunk)
-            return os.path.exists(filename) and os.path.getsize(filename) > 0
-        except Exception as e:
-            logger.warning(f"Download img failed: {str(e)[:140]}")
-            try:
-                if os.path.exists(filename):
-                    os.remove(filename)
-            except Exception:
-                pass
-            return False
-
-    async def _download_carousel_images_from_entries(self, info: Dict) -> List[str]:
-        files: List[str] = []
-        entries = info.get("entries") or []
-
-        for idx, entry in enumerate(entries, start=1):
-            thumbs = entry.get("thumbnails") or []
-            if not thumbs and entry.get("thumbnail"):
-                thumbs = [{"url": entry.get("thumbnail")}]
-
-            img_url = self._pick_best_thumb_url(thumbs) if isinstance(thumbs, list) else None
-            if not img_url:
-                continue
-
-            img_url = self._normalize_url(img_url)
-            ext = self._guess_ext_from_url(img_url)
-            safe_id = entry.get("id") or f"{idx}"
-            filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
-
-            ok = await self._download_url_to_file(img_url, filename)
-            if ok:
-                files.append(filename)
-
-        return files
-
-    async def _download_images_from_info_thumbnails(self, info: Dict) -> List[str]:
-        """
-        Fallback IG: se yt-dlp non dà entries, prova a scaricare da info['thumbnails'].
-        In alcuni casi IG ci mette più URL (anche se non sempre).
-        """
-        thumbs = info.get("thumbnails") or []
-        urls: List[str] = []
-
-        if isinstance(thumbs, list) and thumbs:
-            # ordina per risoluzione, poi dedup
-            thumbs_sorted = sorted(
-                thumbs,
-                key=lambda t: (t.get("width") or 0) * (t.get("height") or 0),
-                reverse=True,
-            )
-            seen = set()
-            for t in thumbs_sorted:
-                u = t.get("url")
-                if not u:
-                    continue
-                u = self._normalize_url(u)
-                if u and u not in seen:
-                    seen.add(u)
-                    urls.append(u)
-                if len(urls) >= 10:
-                    break
-
-        # fallback singolo
-        if not urls and info.get("thumbnail"):
-            urls = [self._normalize_url(info.get("thumbnail"))]
-
-        files: List[str] = []
-        for idx, u in enumerate(urls, start=1):
-            ext = self._guess_ext_from_url(u)
-            filename = os.path.join(self.temp_dir, f"carousel_fallback_{idx}.{ext}")
-            ok = await self._download_url_to_file(u, filename)
-            if ok:
-                files.append(filename)
-
-        return files
-
     async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
+        """
+        Download video classico
+        """
         try:
             opts = self.get_ydl_opts(url, attempt)
-
             loop = asyncio.get_event_loop()
 
             def _download():
@@ -313,6 +209,61 @@ class SocialMediaDownloader:
             logger.error(f"Download attempt {attempt}: {str(e)[:220]}")
             return None
 
+    async def download_instagram_carousel(self, url: str, attempt: int = 0) -> List[str]:
+        """
+        Metodo robusto: usa yt-dlp per scaricare TUTTI gli item del post (foto/video).
+        Noi poi filtriamo e teniamo solo le immagini.
+        """
+        opts = self.get_ydl_opts(url, attempt)
+
+        # output corto e con index per playlist
+        # %(id)s è corto e stabile, %(playlist_index)s evita sovrascritture
+        opts["outtmpl"] = os.path.join(self.temp_dir, "ig_%(id)s_%(playlist_index)s.%(ext)s")
+        opts["noplaylist"] = False
+        opts["ignore_no_formats_error"] = True
+        opts["quiet"] = True
+        opts["no_warnings"] = True
+        opts["max_filesize"] = 50 * 1024 * 1024
+
+        loop = asyncio.get_event_loop()
+
+        def _download_all():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+
+        # prima di scaricare, pulisci eventuali vecchi file con stesso pattern
+        # (evita di raccogliere roba vecchia)
+        for f in glob.glob(os.path.join(self.temp_dir, "ig_*_*.*")):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+        try:
+            await loop.run_in_executor(None, _download_all)
+        except Exception as e:
+            logger.error(f"IG carousel download error: {str(e)[:220]}")
+            return []
+
+        # raccogli ciò che ha creato
+        created = sorted(glob.glob(os.path.join(self.temp_dir, "ig_*_*.*")))
+
+        # tieni SOLO immagini
+        imgs = []
+        for p in created:
+            ext = os.path.splitext(p)[1].lower()
+            if ext in [".jpg", ".jpeg", ".png", ".webp"]:
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    imgs.append(p)
+            else:
+                # se yt-dlp ha scaricato anche un mp4 dentro al post, lo buttiamo
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+        return imgs
+
     # -------------------------
     # main
     # -------------------------
@@ -324,6 +275,8 @@ class SocialMediaDownloader:
         for attempt in range(self.max_retries):
             try:
                 info = await self.extract_info(clean_url, attempt)
+
+                # se non riesce nemmeno a estrarre info -> retry / fail
                 if not info:
                     if attempt < self.max_retries - 1:
                         await asyncio.sleep(self.retry_delay)
@@ -333,30 +286,9 @@ class SocialMediaDownloader:
                 title = info.get("title") or "N/A"
                 uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Sconosciuto"
 
-                # ====== INSTAGRAM /p/ => prova PRIMA carosello foto ======
+                # ====== INSTAGRAM /p/ => SOLO carosello (NON provare video) ======
                 if platform == "instagram" and "/p/" in clean_url.lower():
-                    files: List[str] = []
-                    if self._is_playlist_like(info):
-                        files = await self._download_carousel_images_from_entries(info)
-                    if not files:
-                        files = await self._download_images_from_info_thumbnails(info)
-
-                    # se ha preso almeno 1 immagine -> carousel
-                    if files:
-                        return {
-                            "success": True,
-                            "type": "carousel",
-                            "files": files,
-                            "title": title,
-                            "uploader": uploader,
-                            "platform": platform,
-                            "url": clean_url,
-                        }
-                    # se non trova immagini, allora ci prova come video (ma spesso non esiste)
-
-                # ====== Playlist generica (alcune piattaforme) ======
-                if self._is_playlist_like(info):
-                    files = await self._download_carousel_images_from_entries(info)
+                    files = await self.download_instagram_carousel(clean_url, attempt)
                     if files:
                         return {
                             "success": True,
@@ -368,7 +300,13 @@ class SocialMediaDownloader:
                             "url": clean_url,
                         }
 
-                # ====== VIDEO ======
+                    # se non ha scaricato foto, non provare a scaricare "video" (non esiste)
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self.retry_delay)
+                        continue
+                    return {"success": False}
+
+                # ====== VIDEO (tutte le altre) ======
                 file_path = await self.download_with_ytdlp(clean_url, attempt)
                 if file_path and os.path.exists(file_path):
                     return {
