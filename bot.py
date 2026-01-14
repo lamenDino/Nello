@@ -23,7 +23,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from config import TOKEN, CHAT_ID
+from config import TOKEN, CHAT_ID, RANKING_ENABLED
 from social_downloader import SocialMediaDownloader
 
 # Configurazione logging
@@ -157,6 +157,10 @@ async def send_weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
 
 async def schedule_weekly_ranking(application: Application):
     """Pianifica l'invio del ranking ogni sabato alle 20:30"""
+    if not RANKING_ENABLED:
+        logger.info("⚠️ Ranking disabilitato (CHAT_ID non configurato)")
+        return
+    
     while True:
         try:
             now = datetime.now()
@@ -415,11 +419,19 @@ def main():
         download_handler
     ))
     
-    # Pianifica il ranking settimanale
-    application.post_init = lambda app: asyncio.create_task(schedule_weekly_ranking(app))
+    # Avvia il ranking settimanale se abilitato
+    if RANKING_ENABLED:
+        # Usa job queue per schedulare il ranking
+        application.job_queue.run_repeating(
+            callback=lambda context: asyncio.create_task(send_weekly_ranking(context)),
+            interval=60 * 60,  # Controlla ogni ora
+            first=10  # Aspetta 10 secondi prima del primo check
+        )
+        logger.info("✅ Ranking settimanale pianificato")
+    else:
+        logger.info("⚠️ Ranking disabilitato (CHAT_ID non configurato)")
     
     logger.info("🤖 Bot Telegram avviato...")
-    logger.info("⏰ Ranking settimanale pianificato per ogni sabato alle 20:30")
     
     application.run_polling(drop_pending_updates=True)
 
