@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 """
-File di configurazione per NELLO BOT v5.0
-Variabili d'ambiente + configurazioni locali
+File di configurazione per il bot TikTok
 """
 
 import os
@@ -10,66 +8,86 @@ from dotenv import load_dotenv
 # Carica le variabili d'ambiente
 load_dotenv()
 
-# ============================================
-# CONFIGURAZIONI BOT TELEGRAM
-# ============================================
+# Configurazioni bot
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
 
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TOKEN')
-PORT = int(os.getenv('PORT', 8080))
-
-# ID chat per ranking settimanale (es: il tuo ID chat privata)
-CHAT_ID = os.getenv('CHAT_ID')
-if CHAT_ID:
-    try:
-        CHAT_ID = int(CHAT_ID)
-    except:
-        CHAT_ID = None
-
-# Abilita ranking settimanale (richiede CHAT_ID)
-RANKING_ENABLED = bool(CHAT_ID and os.getenv('RANKING_ENABLED', 'true').lower() in ['true', '1', 'yes'])
-
-# ============================================
-# CONFIGURAZIONI DOWNLOADER
-# ============================================
-
+# Configurazioni TikTok downloader
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (limite Telegram)
 MAX_VIDEO_DURATION = 600  # 10 minuti massimo
 TEMP_DIR = os.getenv('TEMP_DIR', '/tmp')
 
-# Max retry per download (3 tentativi)
-MAX_RETRIES = 3
-
-# ============================================
-# CONFIGURAZIONI LOGGING
-# ============================================
-
+# Configurazioni logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FILE = os.getenv('LOG_FILE', 'bot.log')
 
-# ============================================
-# VALIDAZIONE CONFIG
-# ============================================
+# Lista degli utenti autorizzati (IDs Telegram)
+# Lascia vuoto [] per permettere a tutti, oppure aggiungi gli ID degli amici
+AUTHORIZED_USERS = [
+    # 123456789,  # ID Telegram del primo amico
+    # 987654321,  # ID Telegram del secondo amico
+    # Aggiungi altri ID qui...
+]
+
+# Se la lista è vuota, il bot sarà accessibile a tutti
+ALLOW_ALL_USERS = len(AUTHORIZED_USERS) == 0
+
+# Configurazioni rate limiting
+MAX_DOWNLOADS_PER_USER_PER_HOUR = 10
+RATE_LIMIT_ENABLED = True
+
+# Messaggi personalizzati
+WELCOME_MESSAGE = """
+🎵 **Ciao {name}!** 
+
+Sono il bot del gruppo per scaricare video TikTok! 🚀
+
+**Come usarmi:**
+• Invia semplicemente il link di un video TikTok
+• Riceverai il video senza watermark direttamente qui!
+
+⚠️ **Nota:** Uso consentito solo per il nostro gruppo di amici!
+"""
+
+UNAUTHORIZED_MESSAGE = """
+🚫 **Accesso negato**
+
+Questo bot è riservato solo al nostro gruppo di amici.
+Se pensi che ci sia un errore, contatta l'amministratore.
+"""
+
+ERROR_MESSAGE = """
+💥 Ops! Qualcosa è andato storto.
+
+Possibili cause:
+• Video privato o non disponibile
+• Link non valido
+• Video troppo grande (max 50MB)
+• Problemi temporanei di rete
+
+Riprova tra un momento! 🔄
+"""
+
+# Configurazioni deployment
+PORT = int(os.getenv('PORT', 8080))
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+USE_WEBHOOK = bool(WEBHOOK_URL)
+
+# Configurazioni database (opzionale, per statistiche future)
+DATABASE_URL = os.getenv('DATABASE_URL', '')
+USE_DATABASE = bool(DATABASE_URL)
 
 def validate_config():
     """Valida la configurazione all'avvio"""
     errors = []
     
-    if not TOKEN:
+    if not BOT_TOKEN:
         errors.append("TELEGRAM_BOT_TOKEN mancante")
+    
+    if not ADMIN_USER_ID:
+        errors.append("ADMIN_USER_ID mancante")
     
     if errors:
         raise ValueError(f"Errori di configurazione: {', '.join(errors)}")
     
     return True
-
-# Valida al caricamento
-validate_config()
-
-# Log stato
-import logging
-logger = logging.getLogger(__name__)
-
-if RANKING_ENABLED:
-    logger.info(f"✅ Ranking settimanale ABILITATO (chat: {CHAT_ID})")
-else:
-    logger.info("⚠️ Ranking disabilitato")

@@ -1,214 +1,158 @@
 #!/usr/bin/env python3
 """
-NELLO BOT v5.1 - FINALE DEFINITIVO
-✅ Cancella messaggio utente
-✅ Icone e metadata nel video
-✅ Cancellazione errori automatica (silenzioso)
-✅ 3 retry automatici
-✅ Ranking settimanale (sabato 20:30)
-✅ ParseMode corretto per PTB v22+
-✅ FIX: Message to be replied not found
+Telegram Multi-Platform Video Downloader Bot v3.0
+- Supporta: TikTok, Instagram (reels + posts + storie), Facebook (video + reels), YouTube (shorts)
+- Formattazione bella con emoji e nome utente reale
+- Gestione errori migliorata
 """
 
 import os
-import sys
 import logging
-import asyncio
 import threading
-from datetime import time
+import asyncio
 from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.helpers import escape
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from dotenv import load_dotenv
+from social_downloader import SocialMediaDownloader
 
-# Setup logging
+load_dotenv()
+
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+PORT = int(os.getenv('PORT', '8080'))
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Import config e downloader
-sys.path.insert(0, os.path.dirname(__file__))
-from config import TOKEN, PORT, CHAT_ID, RANKING_ENABLED
-from social_downloader import SocialMediaDownloader
-
-# Inizializza downloader
-downloader = SocialMediaDownloader()
-
-# Variabile globale per il tracking dei download
-download_stats = {
-    'youtube': 0,
-    'tiktok': 0,
-    'instagram': 0,
-    'facebook': 0,
-    'twitter': 0,
-    'unknown': 0
+# Emoji per piattaforme
+PLATFORM_EMOJI = {
+    'tiktok': '🎵',
+    'instagram': '📷',
+    'facebook': '👍',
+    'youtube': '▶️',
+    'twitter': '🐦',
 }
+
+def is_supported_link(url: str) -> bool:
+    """Verifica se il link è di una piattaforma supportata"""
+    domains = [
+        'tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com', 'm.tiktok.com',
+        'instagram.com', 'ig.tv', 'instagram.tv',
+        'facebook.com', 'fb.watch', 'fb.com',
+        'youtube.com', 'youtu.be',
+        'twitter.com', 'x.com'
+    ]
+    return any(d in url for d in domains)
+
+def detect_platform(url: str) -> str:
+    """Rileva la piattaforma dal URL"""
+    url_lower = url.lower()
+    if 'tiktok' in url_lower:
+        return 'TikTok'
+    elif 'instagram' in url_lower or 'ig.tv' in url_lower:
+        return 'Instagram'
+    elif 'facebook' in url_lower or 'fb.' in url_lower:
+        return 'Facebook'
+    elif 'youtube' in url_lower or 'youtu.be' in url_lower:
+        return 'YouTube'
+    elif 'twitter' in url_lower or 'x.com' in url_lower:
+        return 'Twitter'
+    return 'Sconosciuta'
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start"""
-    await update.message.reply_text(
-        "🎬 Benvenuto! Invia un link da:\n"
-        "• YouTube\n"
-        "• TikTok\n"
-        "• Instagram\n"
-        "• Facebook\n\n"
-        "Ti invierò il video scaricato! 🚀"
+    user = update.effective_user
+    message = (
+        f"👋 Ciao {user.first_name}!\n\n"
+        "Sono il bot per scaricare video da:\n"
+        "🎵 TikTok\n"
+        "📷 Instagram (Reels, Posts, Storie)\n"
+        "👍 Facebook (Video, Reels, Reel /share/)\n"
+        "▶️ YouTube (Solo Shorts)\n"
+        "🐦 Twitter/X\n\n"
+        "Inviami semplicemente il link di un video! 🚀"
     )
-
-async def send_weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
-    """Invia il ranking settimanale"""
-    try:
-        if not RANKING_ENABLED or not CHAT_ID:
-            return
-        
-        # Calcola il ranking
-        total = sum(download_stats.values())
-        if total == 0:
-            return
-        
-        ranking_text = (
-            f"📊 <b>RANKING SETTIMANALE</b>\n\n"
-            f"🎬 <b>YouTube:</b> {download_stats['youtube']}\n"
-            f"🎵 <b>TikTok:</b> {download_stats['tiktok']}\n"
-            f"📸 <b>Instagram:</b> {download_stats['instagram']}\n"
-            f"👥 <b>Facebook:</b> {download_stats['facebook']}\n"
-            f"𝕏 <b>Twitter:</b> {download_stats['twitter']}\n\n"
-            f"📈 <b>TOTALE:</b> {total} download\n\n"
-            f"🏆 La piattaforma più scaricata: <b>{max(download_stats, key=download_stats.get).upper()}</b>"
-        )
-        
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=ranking_text,
-            parse_mode=ParseMode.HTML
-        )
-        
-        # Resetta i contatori
-        for key in download_stats:
-            download_stats[key] = 0
-        
-        logger.info("✅ Ranking settimanale inviato")
-    
-    except Exception as e:
-        logger.error(f"Errore invio ranking: {e}")
+    await update.message.reply_text(message)
 
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gestisce i link mandati dagli utenti"""
+    """Handler per il download dei video"""
+    msg = update.message
+    url = msg.text.strip()
     
-    if not update.message or not update.message.text:
+    if not is_supported_link(url):
         return
     
-    url = update.message.text.strip()
-    chat_id = update.effective_chat.id
+    # Messaggio di caricamento
+    loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
     
-    # Valida URL
-    if not any(x in url.lower() for x in ['youtube', 'youtu.be', 'tiktok', 'instagram', 'facebook', 'ig.tv', 'fb.', 'twitter', 'x.com']):
-        # Cancella messaggio silenziosamente
-        try:
-            await update.message.delete()
-        except:
-            pass
-        return
-    
-    # Cancella il messaggio dell'utente (il link)
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.debug(f"Non posso cancellare: {e}")
-    
-    # Invia messaggio "sto scaricando" al chat (NON come reply)
-    try:
-        status_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text="⏳ Sto scaricando... attendi un momento"
-        )
-    except Exception as e:
-        logger.error(f"Errore invio status: {e}")
-        return
+    dl = SocialMediaDownloader()
     
     try:
-        # Scarica il video con retry
-        result = await downloader.download_video(url)
+        info = await dl.download_video(url)
         
-        if not result.get('success'):
-            # Cancella messaggio di errore silenziosamente dopo 3 secondi
+        if info['success']:
+            # Cancella il messaggio originale
             try:
-                await asyncio.sleep(3)
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+                await msg.delete()
             except:
                 pass
-            return
-        
-        # Estrai info
-        file_path = result.get('file_path')
-        title = result.get('title', 'Video').strip()
-        uploader = result.get('uploader', 'Sconosciuto').strip()
-        duration = result.get('duration', 0)
-        platform = result.get('platform', 'unknown').lower()
-        original_url = result.get('url', url)
-        
-        # Incrementa statistiche
-        if platform in download_stats:
-            download_stats[platform] += 1
-        
-        # Formatta durata
-        if duration:
-            mins = int(duration) // 60
-            secs = int(duration) % 60
-            duration_str = f"{mins}:{secs:02d}"
-        else:
-            duration_str = "N/A"
-        
-        # Crea caption con icone
-        caption = (
-            f"🎬 <b>{title}</b>\n\n"
-            f"📺 <b>Canale:</b> {uploader}\n"
-            f"⏱️ <b>Durata:</b> {duration_str}\n"
-            f"🔗 <b>Piattaforma:</b> {platform.upper()}\n\n"
-            f"🔗 <a href=\"{original_url}\">Link Originale</a>"
-        )
-        
-        # Invia il video
-        if os.path.exists(file_path):
-            with open(file_path, 'rb') as video_file:
+            
+            # Estrai info
+            platform = detect_platform(url)
+            emoji = PLATFORM_EMOJI.get(platform.lower(), '📱')
+            uploader = escape(info.get('uploader', 'Sconosciuto'))
+            user_sender = escape(msg.from_user.full_name)
+            title = escape(info.get('title', 'Video scaricato'))
+            orig_link = escape(url)
+            
+            # Formatta la caption con emoji e grassetto
+            caption = (
+                f"{emoji} <b>Video da: {platform}</b>\n"
+                f"👤 Video inviato da: <b>{user_sender}</b>\n"
+                f"🔗 Link originale: {orig_link}\n"
+                f"📝 {title}"
+            )
+            
+            # Invia il video
+            with open(info['file_path'], 'rb') as f:
                 await context.bot.send_video(
-                    chat_id=chat_id,
-                    video=video_file,
+                    chat_id=msg.chat_id,
+                    video=f,
                     caption=caption,
                     parse_mode=ParseMode.HTML
                 )
             
-            # Cancella il messaggio di status
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
+            await loading.delete()
+            os.remove(info['file_path'])
             
-            # Pulisci file temporaneo
-            try:
-                os.remove(file_path)
-            except:
-                pass
         else:
-            # File non trovato - cancella status silenziosamente
-            try:
-                await asyncio.sleep(2)
-                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except:
-                pass
+            # Errore nel download
+            error_msg = info.get('error', 'Errore sconosciuto')
+            await loading.edit_text(
+                f"❌ <b>Errore nel download</b>\n\n"
+                f"Motivo: <i>{escape(error_msg)}</i>\n\n"
+                f"Possibili cause:\n"
+                f"• Video privato\n"
+                f"• Link non valido\n"
+                f"• Video troppo grande (max 50MB)\n"
+                f"• Problemi temporanei\n\n"
+                f"Riprova tra un momento! 🔄",
+                parse_mode=ParseMode.HTML
+            )
     
     except Exception as e:
-        logger.error(f"Errore download: {str(e)[:200]}")
-        # Cancella il messaggio di status silenziosamente
-        try:
-            await asyncio.sleep(2)
-            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-        except:
-            pass
+        logger.error(f"Errore durante il download: {e}")
+        await loading.edit_text(
+            f"❌ <b>Errore inatteso</b>\n\n"
+            f"<code>{escape(str(e)[:100])}</code>",
+            parse_mode=ParseMode.HTML
+        )
 
-# Web server per health check
 async def health(request):
     """Health check endpoint"""
     return web.Response(text="OK")
@@ -222,8 +166,8 @@ async def run_web():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    
     logger.info(f"Web server avviato sulla porta {PORT}")
+    
     await asyncio.Event().wait()
 
 def start_webserver():
@@ -232,47 +176,20 @@ def start_webserver():
 
 def main():
     """Funzione principale"""
-    # Avvia web server
+    # Avvia il web server
     thread = threading.Thread(target=start_webserver, daemon=True)
     thread.start()
-    logger.info("Web server avviato in background")
     
-    # Avvia bot
+    # Avvia il bot
     application = Application.builder().token(TOKEN).build()
-    
-    # Handler
     application.add_handler(CommandHandler('start', start_cmd))
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         download_handler
     ))
     
-    # Job queue per ranking settimanale
-    if RANKING_ENABLED and CHAT_ID:
-        try:
-            job_queue = application.job_queue
-            
-            # Schedula ranking ogni sabato alle 20:30
-            job_queue.run_daily(
-                callback=send_weekly_ranking,
-                time=time(hour=20, minute=30),
-                days=(5,),  # 5 = sabato
-                name='weekly_ranking'
-            )
-            logger.info("✅ Ranking settimanale pianificato (sabato 20:30)")
-        except Exception as e:
-            logger.warning(f"⚠️ Job queue disabilitato: {e}")
-    else:
-        logger.info("⚠️ Ranking disabilitato (manca CHAT_ID)")
-    
-    logger.info("✅ Web server avviato sulla porta 8080")
-    logger.info("🤖 Bot Telegram avviato...")
-    
-    # Polling
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=[]
-    )
+    logger.info("Bot avviato...")
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
