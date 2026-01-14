@@ -1,280 +1,323 @@
 #!/usr/bin/env python3
 """
-Telegram Multi-Platform Video Downloader Bot v3.4
-- Retry silenzioso totale
-- Supporto VIDEO + CAROSELLO FOTO (album unico via media_group)
-- Ranking settimanale TOP 3 con badge
-- Messaggio automatico ogni sabato ore 20:00 (Europe/Rome)
+Social Media Downloader v4.3 (Render-friendly)
+- VIDEO + CAROSELLO FOTO (Instagram: supporto anche via thumbnails)
+- Retry 2 tentativi (poi stop)
+- URL cleaning (TikTok short + Facebook share)
+- Return standard per bot Telegram:
+  - {"success": True, "type": "video", "file_path": "...", ...}
+  - {"success": True, "type": "carousel", "files": ["...","..."], ...}
 """
 
 import os
-import logging
-import threading
 import asyncio
-import random
-from datetime import time
-from collections import defaultdict
+import logging
+import tempfile
+from typing import Dict, Optional, List, Tuple
 
-from aiohttp import web
-from telegram import Update, InputMediaPhoto
-from telegram.constants import ParseMode
-from telegram.helpers import escape
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
-from dotenv import load_dotenv
-from social_downloader import SocialMediaDownloader
+import yt_dlp
+import requests
 
-load_dotenv()
-
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PORT = int(os.getenv("PORT", "8080"))
-
-GROUP_CHAT_ID = 214193849
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
-# =========================
-# RANKING
-# =========================
 
-video_ranking = defaultdict(int)
+class SocialMediaDownloader:
+    def __init__(self):
+        self.temp_dir = tempfile.gettempdir()
 
-BADGES = ["🥇", "🥈", "🥉"]
+        # Cookies (opzionali). NON committarli su GitHub.
+        self.instagram_cookies = os.path.join(os.path.dirname(__file__), "cookies.txt")
+        self.youtube_cookies = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
 
-AFORISMI = [
-    "La costanza batte il talento quando il talento dorme.",
-    "Chi fa ogni giorno qualcosa, arriva sempre lontano.",
-    "Il successo è la somma di piccoli sforzi ripetuti.",
-    "Non esistono scorciatoie che valgano più del percorso.",
-    "La disciplina oggi è la libertà di domani."
-]
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1",
+        ]
 
-# =========================
-# UTILS
-# =========================
+        self.base_opts = {
+            "format": "best[ext=mp4]/best",
+            "outtmpl": os.path.join(self.temp_dir, "%(title)s_%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": 30,
+            "max_filesize": 50 * 1024 * 1024,
+        }
 
-def is_supported_link(url: str) -> bool:
-    return any(d in url for d in [
-        "tiktok.com", "instagram.com", "facebook.com",
-        "youtube.com", "youtu.be", "twitter.com", "x.com"
-    ])
+        # tua richiesta: prova 2 volte e poi silenzio
+        self.max_retries = 2
+        self.retry_delay = 2
 
-def detect_platform(url: str) -> str:
-    url = url.lower()
-    if "tiktok" in url:
-        return "TikTok"
-    if "instagram" in url:
-        return "Instagram"
-    if "facebook" in url:
-        return "Facebook"
-    if "youtube" in url:
-        return "YouTube"
-    if "twitter" in url or "x.com" in url:
-        return "Twitter / X"
-    return "Sconosciuta"
+    def get_random_user_agent(self) -> str:
+        import random
+        return random.choice(self.user_agents)
 
-# =========================
-# COMMANDS
-# =========================
+    def detect_platform(self, url: str) -> str:
+        u = url.lower()
+        if "tiktok" in u:
+            return "tiktok"
+        if "instagram" in u or "ig.tv" in u:
+            return "instagram"
+        if "facebook" in u or "fb." in u:
+            return "facebook"
+        if "youtube" in u or "youtu.be" in u:
+            return "youtube"
+        if "twitter" in u or "x.com" in u:
+            return "twitter"
+        return "unknown"
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Mandami un link video e penso io a tutto 🔥")
+    def clean_url(self, url: str) -> str:
+        url = (url or "").strip()
 
-# =========================
-# DOWNLOAD HANDLER
-# =========================
-
-async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    url = msg.text.strip()
-
-    if not is_supported_link(url):
-        return
-
-    loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
-
-    dl = SocialMediaDownloader()
-
-    try:
-        info = await dl.download_video(url)
-
-        # ❌ fallimento → silenzio totale
-        if not info or not info.get("success"):
-            await loading.delete()
-            return
-
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-
-        # incrementa ranking (1 contenuto = 1 punto, sia video che carosello)
-        video_ranking[msg.from_user.id] += 1
-
-        caption = (
-            f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
-            f"👤 <b>Video inviato da :</b> {escape(msg.from_user.full_name)}\n"
-            f"🔗 <b>Link originale :</b> {escape(url)}\n"
-            f"📝 <b>Meta info video :</b> {escape(info.get('title', 'N/A'))}"
-        )
-
-        # =========================
-        # INVIO CONTENUTI
-        # =========================
-
-        # === VIDEO ===
-        if info.get("type", "video") == "video":
-            with open(info["file_path"], "rb") as f:
-                await context.bot.send_video(
-                    chat_id=msg.chat_id,
-                    video=f,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
-                )
+        if "facebook.com/share/" in url:
             try:
-                os.remove(info["file_path"])
+                r = requests.head(
+                    url,
+                    allow_redirects=True,
+                    timeout=10,
+                    headers={"User-Agent": self.get_random_user_agent()},
+                )
+                url = r.url
             except Exception:
                 pass
 
-        # === CAROSELLO FOTO (ALBUM UNICO) ===
-        elif info.get("type") == "carousel":
-            files = info.get("files", [])
-            if not files:
-                await loading.delete()
-                return
+        if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
+            try:
+                r = requests.head(
+                    url,
+                    allow_redirects=True,
+                    timeout=10,
+                    headers={"User-Agent": self.get_random_user_agent()},
+                )
+                url = r.url
+            except Exception:
+                pass
 
-            # Telegram: max 10 media in un media_group
-            MAX_GROUP = 10
-            chunks = [files[i:i + MAX_GROUP] for i in range(0, len(files), MAX_GROUP)]
+        if "?" in url:
+            url = url.split("?", 1)[0]
 
-            for chunk_index, chunk in enumerate(chunks):
-                media = []
-                opened = []  # teniamo i file handle aperti finché non inviamo
+        return url
 
-                try:
-                    for i, photo_path in enumerate(chunk):
-                        f = open(photo_path, "rb")
-                        opened.append((f, photo_path))
+    def get_ydl_opts(self, url: str, attempt: int = 0) -> Dict:
+        opts = self.base_opts.copy()
 
-                        # Caption solo sulla prima foto del primo chunk
-                        if chunk_index == 0 and i == 0:
-                            media.append(InputMediaPhoto(
-                                media=f,
-                                caption=caption,
-                                parse_mode=ParseMode.HTML
-                            ))
-                        else:
-                            media.append(InputMediaPhoto(media=f))
+        opts["http_headers"] = {
+            "User-Agent": self.get_random_user_agent(),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
 
-                    await context.bot.send_media_group(
-                        chat_id=msg.chat_id,
-                        media=media
-                    )
+        if "instagram" in url.lower() and os.path.exists(self.instagram_cookies):
+            opts["cookiefile"] = self.instagram_cookies
 
-                finally:
-                    # Chiudi handle e cancella file
-                    for f, photo_path in opened:
-                        try:
-                            f.close()
-                        except Exception:
-                            pass
-                        try:
-                            os.remove(photo_path)
-                        except Exception:
-                            pass
+        if "youtube" in url.lower() or "youtu.be" in url.lower():
+            if attempt == 0 and os.path.exists(self.youtube_cookies):
+                opts["cookiefile"] = self.youtube_cookies
+            opts["http_headers"].update(
+                {"Referer": "https://www.youtube.com/", "Origin": "https://www.youtube.com"}
+            )
 
-        await loading.delete()
+        if "facebook" in url.lower():
+            opts["http_headers"].update(
+                {"Referer": "https://www.facebook.com/", "Origin": "https://www.facebook.com"}
+            )
 
-    except Exception as e:
-        logger.error(f"Errore critico: {e}")
+        if "tiktok" in url.lower():
+            opts["http_headers"].update(
+                {"Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com"}
+            )
+
+        return opts
+
+    async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
         try:
-            await loading.delete()
-        except Exception:
-            pass
+            opts = self.get_ydl_opts(url, attempt)
+            opts["skip_download"] = True
 
-# =========================
-# WEEKLY RANKING JOB
-# =========================
+            loop = asyncio.get_event_loop()
 
-async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
-    if not video_ranking:
-        return
+            def _extract():
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(url, download=False)
 
-    sorted_users = sorted(
-        video_ranking.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:3]
+            return await loop.run_in_executor(None, _extract)
 
-    aforisma = random.choice(AFORISMI)
+        except Exception as e:
+            logger.error(f"Extract info attempt {attempt}: {str(e)[:200]}")
+            return None
 
-    text = "🏆 <b>RANKING SETTIMANALE</b>\n\n"
+    def _is_playlist_like(self, info: Dict) -> bool:
+        return isinstance(info, dict) and isinstance(info.get("entries"), list) and len(info.get("entries")) > 0
 
-    for i, (user_id, count) in enumerate(sorted_users):
-        badge = BADGES[i]
-        text += f"{badge} <a href='tg://user?id={user_id}'>Utente</a> — <b>{count}</b> video\n"
+    def _guess_ext_from_url(self, url: str) -> str:
+        u = (url or "").lower()
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            if ext in u:
+                return "jpg" if ext == ".jpeg" else ext.replace(".", "")
+        return "jpg"
 
-    text += f"\n📜 <i>{aforisma}</i>"
+    def _pick_best_image_url(self, entry: Dict) -> Optional[Tuple[str, str]]:
+        # 1) url/ext diretti
+        u = entry.get("url")
+        ext = (entry.get("ext") or "").lower()
+        if u and ext in ("jpg", "jpeg", "png", "webp"):
+            return u, ("jpg" if ext == "jpeg" else ext)
 
-    await context.bot.send_message(
-        chat_id=GROUP_CHAT_ID,
-        text=text,
-        parse_mode=ParseMode.HTML
-    )
+        # 2) formats
+        formats = entry.get("formats") or []
+        candidates = []
+        for f in formats:
+            fu = f.get("url")
+            fext = (f.get("ext") or "").lower()
+            if fu and fext in ("jpg", "jpeg", "png", "webp"):
+                score = (f.get("width") or 0) * (f.get("height") or 0)
+                score = score if score > 0 else (f.get("filesize") or 0)
+                candidates.append((score, fu, ("jpg" if fext == "jpeg" else fext)))
 
-    video_ranking.clear()
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            _, fu, fext = candidates[0]
+            return fu, fext
 
-# =========================
-# WEB SERVER (RENDER)
-# =========================
+        # 3) thumbnails (fix per Instagram caroselli)
+        thumbs = entry.get("thumbnails") or []
+        if isinstance(thumbs, list) and thumbs:
+            best = None
+            best_score = -1
+            for t in thumbs:
+                tu = t.get("url")
+                if not tu:
+                    continue
+                score = (t.get("width") or 0) * (t.get("height") or 0)
+                if score <= 0:
+                    score = t.get("preference") or 0
+                if score > best_score:
+                    best_score = score
+                    best = tu
+            if best:
+                return best, self._guess_ext_from_url(best)
 
-async def health(request):
-    return web.Response(text="OK")
+        tu = entry.get("thumbnail")
+        if tu:
+            return tu, self._guess_ext_from_url(tu)
 
-async def run_web():
-    app = web.Application()
-    app.add_routes([web.get("/", health)])
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    await asyncio.Event().wait()
+        return None
 
-def start_webserver():
-    asyncio.run(run_web())
+    async def _download_carousel_images(self, info: Dict) -> List[str]:
+        files: List[str] = []
+        entries = info.get("entries") or []
+        headers = {"User-Agent": self.get_random_user_agent()}
 
-# =========================
-# MAIN
-# =========================
+        for idx, entry in enumerate(entries, start=1):
+            best = self._pick_best_image_url(entry)
+            if not best:
+                continue
 
-def main():
-    threading.Thread(target=start_webserver, daemon=True).start()
+            img_url, ext = best
+            safe_id = entry.get("id") or f"{idx}"
+            filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
 
-    application = Application.builder().token(TOKEN).build()
+            try:
+                r = requests.get(img_url, headers=headers, stream=True, timeout=25)
+                r.raise_for_status()
+                with open(filename, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 256):
+                        if chunk:
+                            f.write(chunk)
 
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler)
-    )
+                if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                    files.append(filename)
+            except Exception as e:
+                logger.warning(f"Carousel img download failed idx={idx}: {str(e)[:120]}")
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
 
-    # sabato alle 20:00 (days: Sunday=0 ... Saturday=6)
-    application.job_queue.run_daily(
-        weekly_ranking,
-        time=time(hour=20, minute=0),
-        days=(6,),
-        chat_id=GROUP_CHAT_ID
-    )
+        return files
 
-    application.run_polling(drop_pending_updates=True)
+    async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
+        try:
+            opts = self.get_ydl_opts(url, attempt)
+            loop = asyncio.get_event_loop()
 
-if __name__ == "__main__":
-    main()
+            def _download():
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+                    info2 = ydl.extract_info(url, download=False)
+                    return ydl.prepare_filename(info2)
+
+            filename = await loop.run_in_executor(None, _download)
+
+            if filename and os.path.exists(filename):
+                return filename
+
+            if filename:
+                base = os.path.splitext(filename)[0]
+                for ext in [".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv"]:
+                    test_file = base + ext
+                    if os.path.exists(test_file):
+                        return test_file
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
+            return None
+
+    async def download_video(self, url: str) -> Dict:
+        clean_url = self.clean_url(url)
+        platform = self.detect_platform(clean_url)
+
+        for attempt in range(self.max_retries):
+            try:
+                info = await self.extract_info(clean_url, attempt)
+                if not info:
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self.retry_delay)
+                        continue
+                    return {"success": False, "error": "extraction_failed"}
+
+                title = info.get("title") or "N/A"
+                uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Sconosciuto"
+
+                if self._is_playlist_like(info):
+                    files = await self._download_carousel_images(info)
+                    if files:
+                        return {
+                            "success": True,
+                            "type": "carousel",
+                            "files": files,
+                            "title": title,
+                            "uploader": uploader,
+                            "platform": platform,
+                            "url": clean_url,
+                        }
+
+                file_path = await self.download_with_ytdlp(clean_url, attempt)
+                if file_path and os.path.exists(file_path):
+                    return {
+                        "success": True,
+                        "type": "video",
+                        "file_path": file_path,
+                        "title": title,
+                        "uploader": uploader,
+                        "duration": info.get("duration", 0) or 0,
+                        "platform": platform,
+                        "url": clean_url,
+                    }
+
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                    continue
+
+                return {"success": False, "error": "download_failed"}
+
+            except Exception as e:
+                logger.error(f"Attempt {attempt + 1} failed: {str(e)[:200]}")
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                    continue
+                return {"success": False, "error": "exception"}
