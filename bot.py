@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Telegram Multi-Platform Video Downloader Bot v3.1
-+ Retry silenzioso se estrazione fallisce
-+ Ranking settimanale automatico (sabato ore 20)
+Telegram Multi-Platform Video Downloader Bot v3.2
+- Retry silenzioso totale
+- Ranking settimanale TOP 3 con badge
+- Messaggio automatico ogni sabato ore 20
 """
 
 import os
@@ -32,6 +33,8 @@ load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 PORT = int(os.getenv('PORT', '8080'))
 
+GROUP_CHAT_ID = 214193849  # 👈 ID GRUPPO
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -39,63 +42,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================
-# RANKING SETTIMANALE
+# RANKING
 # =========================
 
 video_ranking = defaultdict(int)
 
+BADGES = ["🥇", "🥈", "🥉"]
+
 AFORISMI = [
-    "La vita è come un video: se non la vivi, non la puoi scaricare.",
-    "Chi semina costanza raccoglie risultati.",
-    "Non conta quanto vai veloce, ma che tu non ti fermi.",
-    "Ogni giorno è una nuova occasione per fare meglio.",
-    "La disciplina batte il talento quando il talento non si allena."
+    "La costanza batte il talento quando il talento dorme.",
+    "Chi fa ogni giorno qualcosa, arriva sempre lontano.",
+    "Il successo è la somma di piccoli sforzi ripetuti.",
+    "Non esistono scorciatoie che valgano più del percorso.",
+    "La disciplina oggi è la libertà di domani."
 ]
 
-# Emoji per piattaforme
-PLATFORM_EMOJI = {
-    'tiktok': '🎵',
-    'instagram': '📷',
-    'facebook': '👍',
-    'youtube': '▶️',
-    'twitter': '🐦',
-}
+# =========================
+# UTILS
+# =========================
 
 def is_supported_link(url: str) -> bool:
-    domains = [
-        'tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com',
-        'instagram.com', 'ig.tv',
-        'facebook.com', 'fb.watch',
-        'youtube.com', 'youtu.be',
-        'twitter.com', 'x.com'
-    ]
-    return any(d in url for d in domains)
+    return any(d in url for d in [
+        'tiktok.com', 'instagram.com', 'facebook.com',
+        'youtube.com', 'youtu.be', 'twitter.com', 'x.com'
+    ])
 
 def detect_platform(url: str) -> str:
-    url_lower = url.lower()
-    if 'tiktok' in url_lower:
-        return 'TikTok'
-    if 'instagram' in url_lower:
-        return 'Instagram'
-    if 'facebook' in url_lower:
-        return 'Facebook'
-    if 'youtube' in url_lower:
-        return 'YouTube'
-    if 'twitter' in url_lower or 'x.com' in url_lower:
-        return 'Twitter'
+    url = url.lower()
+    if 'tiktok' in url: return 'TikTok'
+    if 'instagram' in url: return 'Instagram'
+    if 'facebook' in url: return 'Facebook'
+    if 'youtube' in url: return 'YouTube'
+    if 'twitter' in url or 'x.com' in url: return 'Twitter'
     return 'Sconosciuta'
 
 # =========================
-# COMANDI
+# COMMANDS
 # =========================
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Inviami un link video (TikTok, Instagram, Facebook, YouTube Shorts, Twitter)"
-    )
+    await update.message.reply_text("Mandami un link video e penso io a tutto 🔥")
 
 # =========================
-# HANDLER DOWNLOAD
+# DOWNLOAD HANDLER
 # =========================
 
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,36 +94,28 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_supported_link(url):
         return
 
-    loading = await context.bot.send_message(
-        msg.chat_id,
-        "⏳ Download in corso..."
-    )
+    loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
 
     dl = SocialMediaDownloader()
 
     try:
         info = await dl.download_video(url)
 
-        # ❌ FALLIMENTO → SILENZIO ASSOLUTO
+        # ❌ FALLIMENTO → SILENZIO TOTALE
         if not info.get('success'):
             await loading.delete()
             return
 
-        # ✅ SUCCESSO
         try:
             await msg.delete()
         except:
             pass
 
-        # Ranking
-        user_id = msg.from_user.id
-        video_ranking[user_id] += 1
-
-        platform = detect_platform(url)
-        emoji = PLATFORM_EMOJI.get(platform.lower(), '📱')
+        # Incrementa ranking
+        video_ranking[msg.from_user.id] += 1
 
         caption = (
-            f"{emoji} <b>Video da: {platform}</b>\n"
+            f"📹 <b>Video da {detect_platform(url)}</b>\n"
             f"👤 Inviato da: <b>{escape(msg.from_user.full_name)}</b>\n"
             f"🔗 {escape(url)}"
         )
@@ -151,30 +132,38 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(info['file_path'])
 
     except Exception as e:
-        logger.error(f"Errore grave: {e}")
+        logger.error(f"Errore critico: {e}")
         await loading.delete()
 
 # =========================
-# RANKING JOB
+# WEEKLY RANKING JOB
 # =========================
 
 async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
     if not video_ranking:
         return
 
-    winner_id = max(video_ranking, key=video_ranking.get)
-    count = video_ranking[winner_id]
+    sorted_users = sorted(
+        video_ranking.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:3]
+
     aforisma = random.choice(AFORISMI)
 
-    text = (
-        f"🏆 <b>Ranking settimanale</b>\n\n"
-        f"👏 Complimenti <a href='tg://user?id={winner_id}'>campione</a>!\n"
-        f"Hai inviato <b>{count} video</b> questa settimana.\n\n"
-        f"📜 <i>{aforisma}</i>"
-    )
+    text = "🏆 <b>RANKING SETTIMANALE</b>\n\n"
+
+    for i, (user_id, count) in enumerate(sorted_users):
+        badge = BADGES[i]
+        text += (
+            f"{badge} <a href='tg://user?id={user_id}'>Utente</a> "
+            f"— <b>{count}</b> video\n"
+        )
+
+    text += f"\n📜 <i>{aforisma}</i>"
 
     await context.bot.send_message(
-        chat_id=context.job.chat_id,
+        chat_id=GROUP_CHAT_ID,
         text=text,
         parse_mode=ParseMode.HTML
     )
@@ -191,12 +180,10 @@ async def health(request):
 async def run_web():
     app = web.Application()
     app.add_routes([web.get('/', health)])
-
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-
     await asyncio.Event().wait()
 
 def start_webserver():
@@ -216,12 +203,12 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler)
     )
 
-    # JOB SETTIMANALE – SABATO ORE 20:00
+    # SABATO ORE 20:00
     application.job_queue.run_weekly(
         weekly_ranking,
         time=time(hour=20, minute=0),
-        days=(5,),  # Sabato
-        chat_id=-214193849  # ← ID DEL GRUPPO (CAMBIALO!)
+        days=(5,),
+        chat_id=GROUP_CHAT_ID
     )
 
     application.run_polling(drop_pending_updates=True)
