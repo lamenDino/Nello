@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Telegram Multi-Platform Video Downloader Bot v3.3
+Telegram Multi-Platform Video Downloader Bot v3.4
 - Retry silenzioso totale
-- Supporto VIDEO + CAROSELLO FOTO
+- Supporto VIDEO + CAROSELLO FOTO (album unico via media_group)
 - Ranking settimanale TOP 3 con badge
 - Messaggio automatico ogni sabato ore 20:00 (Europe/Rome)
 """
@@ -19,6 +19,7 @@ from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.helpers import escape
+from telegram import InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -70,11 +71,16 @@ def is_supported_link(url: str) -> bool:
 
 def detect_platform(url: str) -> str:
     url = url.lower()
-    if "tiktok" in url: return "TikTok"
-    if "instagram" in url: return "Instagram"
-    if "facebook" in url: return "Facebook"
-    if "youtube" in url: return "YouTube"
-    if "twitter" in url or "x.com" in url: return "Twitter / X"
+    if "tiktok" in url:
+        return "TikTok"
+    if "instagram" in url:
+        return "Instagram"
+    if "facebook" in url:
+        return "Facebook"
+    if "youtube" in url:
+        return "YouTube"
+    if "twitter" in url or "x.com" in url:
+        return "Twitter / X"
     return "Sconosciuta"
 
 # =========================
@@ -109,10 +115,10 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await msg.delete()
-        except:
+        except Exception:
             pass
 
-        # incrementa ranking
+        # incrementa ranking (1 contenuto = 1 punto, sia video che carosello)
         video_ranking[msg.from_user.id] += 1
 
         caption = (
@@ -135,25 +141,67 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=caption,
                     parse_mode=ParseMode.HTML
                 )
-            os.remove(info["file_path"])
+            try:
+                os.remove(info["file_path"])
+            except Exception:
+                pass
 
-        # === CAROSELLO FOTO ===
-        elif info["type"] == "carousel":
-            for i, photo_path in enumerate(info["files"]):
-                with open(photo_path, "rb") as f:
-                    await context.bot.send_photo(
+        # === CAROSELLO FOTO (ALBUM UNICO) ===
+        elif info.get("type") == "carousel":
+            files = info.get("files", [])
+            if not files:
+                await loading.delete()
+                return
+
+            # Telegram: max 10 media in un media_group
+            # Se vuoi, puoi aumentare spezzando in più album.
+            MAX_GROUP = 10
+            chunks = [files[i:i + MAX_GROUP] for i in range(0, len(files), MAX_GROUP)]
+
+            for chunk_index, chunk in enumerate(chunks):
+                media = []
+                opened = []  # teniamo i file handle aperti finché non inviamo
+
+                try:
+                    for i, photo_path in enumerate(chunk):
+                        f = open(photo_path, "rb")
+                        opened.append((f, photo_path))
+
+                        # Caption solo sulla prima foto del primo chunk
+                        if chunk_index == 0 and i == 0:
+                            media.append(InputMediaPhoto(
+                                media=f,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            ))
+                        else:
+                            media.append(InputMediaPhoto(media=f))
+
+                    await context.bot.send_media_group(
                         chat_id=msg.chat_id,
-                        photo=f,
-                        caption=caption if i == 0 else None,
-                        parse_mode=ParseMode.HTML if i == 0 else None
+                        media=media
                     )
-                os.remove(photo_path)
+
+                finally:
+                    # Chiudi handle e cancella file
+                    for f, photo_path in opened:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(photo_path)
+                        except Exception:
+                            pass
 
         await loading.delete()
 
     except Exception as e:
         logger.error(f"Errore critico: {e}")
-        await loading.delete()
+        try:
+            await loading.delete()
+        except Exception:
+            pass
 
 # =========================
 # WEEKLY RANKING JOB
@@ -175,10 +223,7 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
 
     for i, (user_id, count) in enumerate(sorted_users):
         badge = BADGES[i]
-        text += (
-            f"{badge} <a href='tg://user?id={user_id}'>Utente</a> "
-            f"— <b>{count}</b> video\n"
-        )
+        text += f"{badge} <a href='tg://user?id={user_id}'>Utente</a> — <b>{count}</b> video\n"
 
     text += f"\n📜 <i>{aforisma}</i>"
 
