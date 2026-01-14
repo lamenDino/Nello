@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v4.5
-- VIDEO + CAROSELLO FOTO (Instagram: supporto thumbnails)
+Social Media Downloader v4.6
+- VIDEO + CAROSELLO FOTO (Instagram: supporto thumbnails/entries)
 - Retry 2 tentativi (poi stop)
 - Fix "File name too long" (niente title nel filename)
-- Cookie IG/YT opzionali
-- TikTok fallback (ma resta limitato se TikTok blocca datacenter)
+- Fix IG carousel: ignore_no_formats_error + extract_info senza 'format'
+- Fix TikTok photo-post: riscrive /photo/<id> -> /video/<id> (best effort)
 """
 
 import os
 import asyncio
 import logging
 import tempfile
+import re
 from typing import Dict, Optional, List, Tuple
 
 import yt_dlp
@@ -50,10 +51,8 @@ class SocialMediaDownloader:
             "nocheckcertificate": True,
             "geo_bypass": True,
             "forceipv4": True,
-
-            # IMPORTANTI:
-            "restrictfilenames": True,  # niente caratteri strani/spazi strani
-            "nopart": True,             # evita file .part lunghissimi
+            "restrictfilenames": True,
+            "nopart": True,
         }
 
         self.max_retries = 2
@@ -79,9 +78,22 @@ class SocialMediaDownloader:
             return "twitter"
         return "unknown"
 
+    def _rewrite_tiktok_photo_to_video(self, url: str) -> str:
+        """
+        TikTok photo-post: /photo/<id>
+        Proviamo best-effort: /video/<id>
+        """
+        m = re.search(r"(https?://www\.tiktok\.com/@[^/]+)/(photo)/(\d+)", url)
+        if not m:
+            return url
+        base = m.group(1)
+        vid = m.group(3)
+        return f"{base}/video/{vid}"
+
     def clean_url(self, url: str) -> str:
         url = (url or "").strip()
 
+        # espansioni redirect
         if "facebook.com/share/" in url:
             try:
                 r = requests.head(url, allow_redirects=True, timeout=10, headers={"User-Agent": self.get_random_user_agent()})
@@ -96,8 +108,13 @@ class SocialMediaDownloader:
             except Exception:
                 pass
 
+        # rimuovi querystring (IG img_index ecc)
         if "?" in url:
             url = url.split("?", 1)[0]
+
+        # TikTok photo -> video (best effort)
+        if "tiktok.com" in url.lower() and "/photo/" in url.lower():
+            url = self._rewrite_tiktok_photo_to_video(url)
 
         return url
 
@@ -124,16 +141,25 @@ class SocialMediaDownloader:
         if "facebook" in url.lower():
             opts["http_headers"].update({"Referer": "https://www.facebook.com/", "Origin": "https://www.facebook.com"})
 
-        # TikTok headers (mobile helps)
+        # TikTok headers
         if "tiktok" in url.lower():
             opts["http_headers"].update({"Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com"})
 
         return opts
 
     async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
+        """
+        Estrazione metadata robusta:
+        - NON forziamo il formato video qui (altrimenti IG carousel fallisce con "No video formats found")
+        - ignore_no_formats_error=True per post solo foto
+        """
         try:
             opts = self.get_ydl_opts(url, attempt)
             opts["skip_download"] = True
+
+            # IMPORTANT: rimuovi format in fase di extract_info
+            opts.pop("format", None)
+            opts["ignore_no_formats_error"] = True
 
             loop = asyncio.get_event_loop()
 
@@ -180,7 +206,7 @@ class SocialMediaDownloader:
             _, fu, fext = candidates[0]
             return fu, fext
 
-        # 3) thumbnails (IG spesso mette qui le foto)
+        # 3) thumbnails
         thumbs = entry.get("thumbnails") or []
         if isinstance(thumbs, list) and thumbs:
             best = None
@@ -254,7 +280,6 @@ class SocialMediaDownloader:
             if filename and os.path.exists(filename):
                 return filename
 
-            # fallback estensioni
             if filename:
                 base = os.path.splitext(filename)[0]
                 for ext in [".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv"]:
@@ -268,9 +293,9 @@ class SocialMediaDownloader:
             logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
             return None
 
-    def _looks_like_tiktok_block(self, err: str) -> bool:
+    def _looks_like_tiktok_unsupported(self, err: str) -> bool:
         e = (err or "").lower()
-        return ("tiktok" in e and "status code 0" in e) or ("video not available" in e)
+        return "unsupported url" in e and "tiktok" in e
 
     async def download_video(self, url: str) -> Dict:
         clean_url = self.clean_url(url)
@@ -290,7 +315,7 @@ class SocialMediaDownloader:
                 title = info.get("title") or "N/A"
                 uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Sconosciuto"
 
-                # carosello
+                # carosello (IG / TikTok photo se yt-dlp ritorna entries)
                 if self._is_playlist_like(info):
                     files = await self._download_carousel_images(info)
                     if files:
@@ -328,8 +353,8 @@ class SocialMediaDownloader:
                 last_error = str(e)
                 logger.error(f"Attempt {attempt + 1} failed: {last_error[:200]}")
 
-                # fallback tiktok
-                if platform == "tiktok" and self._looks_like_tiktok_block(last_error):
+                # Se è TikTok photo (unsupported), prova fallback downloader
+                if platform == "tiktok" and self._looks_like_tiktok_unsupported(last_error):
                     return await self.tiktok_fallback.download_video(clean_url)
 
                 if attempt < self.max_retries - 1:
