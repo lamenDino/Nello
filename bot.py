@@ -116,9 +116,10 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         video_ranking[msg.from_user.id] += 1
 
         caption = (
-            f"📹 <b>Video da {detect_platform(url)}</b>\n"
-            f"👤 Inviato da: <b>{escape(msg.from_user.full_name)}</b>\n"
-            f"🔗 {escape(url)}"
+            f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
+            f"👤 <b>Inviato da :</b> {escape(msg.from_user.full_name)}\n"
+            f"🔗 <b>Link :</b> {escape(url)}\n"
+            f"📝 <b>Meta :</b> {escape(info.get('title', 'N/A'))}"
         )
 
         with open(info['file_path'], 'rb') as f:
