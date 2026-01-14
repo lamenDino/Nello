@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-NELLO BOT v5.0 - COMPLETO
+NELLO BOT v5.0 - FINALE CORRETTO
 ✅ Cancella messaggio utente
 ✅ Icone e metadata nel video
 ✅ Cancellazione errori automatica (silenzioso)
-✅ 3 retry automatici (già in social_downloader)
+✅ 3 retry automatici
 ✅ Ranking settimanale (sabato 20:30)
-✅ Senza job_queue (usa APScheduler nativo di PTB)
+✅ ParseMode corretto per PTB v22+
 """
 
 import os
@@ -14,9 +14,10 @@ import sys
 import logging
 import asyncio
 import threading
-from datetime import datetime, time
+from datetime import time
 from aiohttp import web
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Setup logging
@@ -119,7 +120,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("⏳ Sto scaricando... attendi un momento")
     
     try:
-        # Scarica il video con retry (retry già incluso in social_downloader)
+        # Scarica il video con retry
         result = await downloader.download_video(url)
         
         if not result.get('success'):
