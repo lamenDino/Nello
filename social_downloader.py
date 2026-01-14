@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v4.3 (Render-friendly)
-- VIDEO + CAROSELLO FOTO (Instagram: supporto anche via thumbnails)
+Social Media Downloader v4.5
+- VIDEO + CAROSELLO FOTO (Instagram: supporto thumbnails)
 - Retry 2 tentativi (poi stop)
-- URL cleaning (TikTok short + Facebook share)
-- Return standard per bot Telegram:
-  - {"success": True, "type": "video", "file_path": "...", ...}
-  - {"success": True, "type": "carousel", "files": ["...","..."], ...}
+- Fix "File name too long" (niente title nel filename)
+- Cookie IG/YT opzionali
+- TikTok fallback (ma resta limitato se TikTok blocca datacenter)
 """
 
 import os
@@ -18,6 +17,8 @@ from typing import Dict, Optional, List, Tuple
 import yt_dlp
 import requests
 
+from tiktok_downloader import TikTokDownloader
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,29 +26,40 @@ class SocialMediaDownloader:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
 
-        # Cookies (opzionali). NON committarli su GitHub.
         self.instagram_cookies = os.path.join(os.path.dirname(__file__), "cookies.txt")
         self.youtube_cookies = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
 
         self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ]
 
+        # FIX filename: niente title (causa Errno 36)
         self.base_opts = {
             "format": "best[ext=mp4]/best",
-            "outtmpl": os.path.join(self.temp_dir, "%(title)s_%(id)s.%(ext)s"),
+            "outtmpl": os.path.join(self.temp_dir, "%(extractor)s_%(id)s.%(ext)s"),
+            "paths": {"home": self.temp_dir},
             "quiet": True,
             "no_warnings": True,
             "socket_timeout": 30,
             "max_filesize": 50 * 1024 * 1024,
+            "retries": 3,
+            "fragment_retries": 3,
+            "nocheckcertificate": True,
+            "geo_bypass": True,
+            "forceipv4": True,
+
+            # IMPORTANTI:
+            "restrictfilenames": True,  # niente caratteri strani/spazi strani
+            "nopart": True,             # evita file .part lunghissimi
         }
 
-        # tua richiesta: prova 2 volte e poi silenzio
         self.max_retries = 2
         self.retry_delay = 2
+
+        self.tiktok_fallback = TikTokDownloader()
 
     def get_random_user_agent(self) -> str:
         import random
@@ -72,24 +84,14 @@ class SocialMediaDownloader:
 
         if "facebook.com/share/" in url:
             try:
-                r = requests.head(
-                    url,
-                    allow_redirects=True,
-                    timeout=10,
-                    headers={"User-Agent": self.get_random_user_agent()},
-                )
+                r = requests.head(url, allow_redirects=True, timeout=10, headers={"User-Agent": self.get_random_user_agent()})
                 url = r.url
             except Exception:
                 pass
 
         if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
             try:
-                r = requests.head(
-                    url,
-                    allow_redirects=True,
-                    timeout=10,
-                    headers={"User-Agent": self.get_random_user_agent()},
-                )
+                r = requests.head(url, allow_redirects=True, timeout=10, headers={"User-Agent": self.get_random_user_agent()})
                 url = r.url
             except Exception:
                 pass
@@ -100,7 +102,7 @@ class SocialMediaDownloader:
         return url
 
     def get_ydl_opts(self, url: str, attempt: int = 0) -> Dict:
-        opts = self.base_opts.copy()
+        opts = dict(self.base_opts)
 
         opts["http_headers"] = {
             "User-Agent": self.get_random_user_agent(),
@@ -108,25 +110,23 @@ class SocialMediaDownloader:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
+        # Instagram cookies
         if "instagram" in url.lower() and os.path.exists(self.instagram_cookies):
             opts["cookiefile"] = self.instagram_cookies
 
+        # YouTube cookies + headers
         if "youtube" in url.lower() or "youtu.be" in url.lower():
             if attempt == 0 and os.path.exists(self.youtube_cookies):
                 opts["cookiefile"] = self.youtube_cookies
-            opts["http_headers"].update(
-                {"Referer": "https://www.youtube.com/", "Origin": "https://www.youtube.com"}
-            )
+            opts["http_headers"].update({"Referer": "https://www.youtube.com/", "Origin": "https://www.youtube.com"})
 
+        # Facebook headers
         if "facebook" in url.lower():
-            opts["http_headers"].update(
-                {"Referer": "https://www.facebook.com/", "Origin": "https://www.facebook.com"}
-            )
+            opts["http_headers"].update({"Referer": "https://www.facebook.com/", "Origin": "https://www.facebook.com"})
 
+        # TikTok headers (mobile helps)
         if "tiktok" in url.lower():
-            opts["http_headers"].update(
-                {"Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com"}
-            )
+            opts["http_headers"].update({"Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com"})
 
         return opts
 
@@ -180,7 +180,7 @@ class SocialMediaDownloader:
             _, fu, fext = candidates[0]
             return fu, fext
 
-        # 3) thumbnails (fix per Instagram caroselli)
+        # 3) thumbnails (IG spesso mette qui le foto)
         thumbs = entry.get("thumbnails") or []
         if isinstance(thumbs, list) and thumbs:
             best = None
@@ -225,7 +225,6 @@ class SocialMediaDownloader:
                     for chunk in r.iter_content(chunk_size=1024 * 256):
                         if chunk:
                             f.write(chunk)
-
                 if os.path.exists(filename) and os.path.getsize(filename) > 0:
                     files.append(filename)
             except Exception as e:
@@ -241,6 +240,7 @@ class SocialMediaDownloader:
     async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
         try:
             opts = self.get_ydl_opts(url, attempt)
+
             loop = asyncio.get_event_loop()
 
             def _download():
@@ -254,6 +254,7 @@ class SocialMediaDownloader:
             if filename and os.path.exists(filename):
                 return filename
 
+            # fallback estensioni
             if filename:
                 base = os.path.splitext(filename)[0]
                 for ext in [".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv"]:
@@ -267,9 +268,15 @@ class SocialMediaDownloader:
             logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
             return None
 
+    def _looks_like_tiktok_block(self, err: str) -> bool:
+        e = (err or "").lower()
+        return ("tiktok" in e and "status code 0" in e) or ("video not available" in e)
+
     async def download_video(self, url: str) -> Dict:
         clean_url = self.clean_url(url)
         platform = self.detect_platform(clean_url)
+
+        last_error = ""
 
         for attempt in range(self.max_retries):
             try:
@@ -283,6 +290,7 @@ class SocialMediaDownloader:
                 title = info.get("title") or "N/A"
                 uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Sconosciuto"
 
+                # carosello
                 if self._is_playlist_like(info):
                     files = await self._download_carousel_images(info)
                     if files:
@@ -296,6 +304,7 @@ class SocialMediaDownloader:
                             "url": clean_url,
                         }
 
+                # video
                 file_path = await self.download_with_ytdlp(clean_url, attempt)
                 if file_path and os.path.exists(file_path):
                     return {
@@ -316,8 +325,15 @@ class SocialMediaDownloader:
                 return {"success": False, "error": "download_failed"}
 
             except Exception as e:
-                logger.error(f"Attempt {attempt + 1} failed: {str(e)[:200]}")
+                last_error = str(e)
+                logger.error(f"Attempt {attempt + 1} failed: {last_error[:200]}")
+
+                # fallback tiktok
+                if platform == "tiktok" and self._looks_like_tiktok_block(last_error):
+                    return await self.tiktok_fallback.download_video(clean_url)
+
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(self.retry_delay)
                     continue
+
                 return {"success": False, "error": "exception"}
