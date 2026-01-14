@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Telegram Multi-Platform Video Downloader Bot v3.2
+Telegram Multi-Platform Video Downloader Bot v3.3
 - Retry silenzioso totale
+- Supporto VIDEO + CAROSELLO FOTO
 - Ranking settimanale TOP 3 con badge
 - Messaggio automatico ogni sabato ore 20:00 (Europe/Rome)
 """
@@ -30,14 +31,13 @@ from social_downloader import SocialMediaDownloader
 
 load_dotenv()
 
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-PORT = int(os.getenv('PORT', '8080'))
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+PORT = int(os.getenv("PORT", "8080"))
 
-# Gruppo fornito da te
 GROUP_CHAT_ID = 214193849
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -64,18 +64,18 @@ AFORISMI = [
 
 def is_supported_link(url: str) -> bool:
     return any(d in url for d in [
-        'tiktok.com', 'instagram.com', 'facebook.com',
-        'youtube.com', 'youtu.be', 'twitter.com', 'x.com'
+        "tiktok.com", "instagram.com", "facebook.com",
+        "youtube.com", "youtu.be", "twitter.com", "x.com"
     ])
 
 def detect_platform(url: str) -> str:
     url = url.lower()
-    if 'tiktok' in url: return 'TikTok'
-    if 'instagram' in url: return 'Instagram'
-    if 'facebook' in url: return 'Facebook'
-    if 'youtube' in url: return 'YouTube'
-    if 'twitter' in url or 'x.com' in url: return 'Twitter'
-    return 'Sconosciuta'
+    if "tiktok" in url: return "TikTok"
+    if "instagram" in url: return "Instagram"
+    if "facebook" in url: return "Facebook"
+    if "youtube" in url: return "YouTube"
+    if "twitter" in url or "x.com" in url: return "Twitter / X"
+    return "Sconosciuta"
 
 # =========================
 # COMMANDS
@@ -102,8 +102,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await dl.download_video(url)
 
-        # ❌ FALLIMENTO → SILENZIO TOTALE (non invia messaggi d'errore)
-        if not info.get('success'):
+        # ❌ fallimento → silenzio totale
+        if not info or not info.get("success"):
             await loading.delete()
             return
 
@@ -112,26 +112,44 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-        # Incrementa ranking
+        # incrementa ranking
         video_ranking[msg.from_user.id] += 1
 
         caption = (
             f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
-            f"👤 <b>Inviato da :</b> {escape(msg.from_user.full_name)}\n"
-            f"🔗 <b>Link :</b> {escape(url)}\n"
-            f"📝 <b>Meta :</b> {escape(info.get('title', 'N/A'))}"
+            f"👤 <b>Video inviato da :</b> {escape(msg.from_user.full_name)}\n"
+            f"🔗 <b>Link originale :</b> {escape(url)}\n"
+            f"📝 <b>Meta info video :</b> {escape(info.get('title', 'N/A'))}"
         )
 
-        with open(info['file_path'], 'rb') as f:
-            await context.bot.send_video(
-                chat_id=msg.chat_id,
-                video=f,
-                caption=caption,
-                parse_mode=ParseMode.HTML
-            )
+        # =========================
+        # INVIO CONTENUTI
+        # =========================
+
+        # === VIDEO ===
+        if info.get("type", "video") == "video":
+            with open(info["file_path"], "rb") as f:
+                await context.bot.send_video(
+                    chat_id=msg.chat_id,
+                    video=f,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
+            os.remove(info["file_path"])
+
+        # === CAROSELLO FOTO ===
+        elif info["type"] == "carousel":
+            for i, photo_path in enumerate(info["files"]):
+                with open(photo_path, "rb") as f:
+                    await context.bot.send_photo(
+                        chat_id=msg.chat_id,
+                        photo=f,
+                        caption=caption if i == 0 else None,
+                        parse_mode=ParseMode.HTML if i == 0 else None
+                    )
+                os.remove(photo_path)
 
         await loading.delete()
-        os.remove(info['file_path'])
 
     except Exception as e:
         logger.error(f"Errore critico: {e}")
@@ -156,7 +174,7 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
     text = "🏆 <b>RANKING SETTIMANALE</b>\n\n"
 
     for i, (user_id, count) in enumerate(sorted_users):
-        badge = BADGES[i] if i < len(BADGES) else ""
+        badge = BADGES[i]
         text += (
             f"{badge} <a href='tg://user?id={user_id}'>Utente</a> "
             f"— <b>{count}</b> video\n"
@@ -181,10 +199,10 @@ async def health(request):
 
 async def run_web():
     app = web.Application()
-    app.add_routes([web.get('/', health)])
+    app.add_routes([web.get("/", health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     await asyncio.Event().wait()
 
@@ -200,12 +218,11 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler('start', start_cmd))
+    application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler)
     )
 
-    # === QUI: ogni sabato alle 20:00 (sabato = 6, mapping sunday=0 ... saturday=6) ===
     application.job_queue.run_daily(
         weekly_ranking,
         time=time(hour=20, minute=0),
@@ -215,5 +232,5 @@ def main():
 
     application.run_polling(drop_pending_updates=True)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
