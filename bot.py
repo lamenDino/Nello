@@ -221,7 +221,7 @@ def main():
         weekly_ranking,
         time=time(hour=20, minute=0),
         days=(5,),  # Sabato
-        chat_id=-100  # ← ID DEL GRUPPO (CAMBIALO!)
+        chat_id=-214193849  # ← ID DEL GRUPPO (CAMBIALO!)
     )
 
     application.run_polling(drop_pending_updates=True)
