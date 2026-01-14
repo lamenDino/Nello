@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-NELLO BOT v5.0 - FINALE CORRETTO
+NELLO BOT v5.1 - FINALE DEFINITIVO
 ✅ Cancella messaggio utente
 ✅ Icone e metadata nel video
 ✅ Cancellazione errori automatica (silenzioso)
 ✅ 3 retry automatici
 ✅ Ranking settimanale (sabato 20:30)
 ✅ ParseMode corretto per PTB v22+
+✅ FIX: Message to be replied not found
 """
 
 import os
@@ -100,6 +101,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     url = update.message.text.strip()
+    chat_id = update.effective_chat.id
     
     # Valida URL
     if not any(x in url.lower() for x in ['youtube', 'youtu.be', 'tiktok', 'instagram', 'facebook', 'ig.tv', 'fb.', 'twitter', 'x.com']):
@@ -116,8 +118,15 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.debug(f"Non posso cancellare: {e}")
     
-    # Invia messaggio "sto scaricando"
-    status_msg = await update.message.reply_text("⏳ Sto scaricando... attendi un momento")
+    # Invia messaggio "sto scaricando" al chat (NON come reply)
+    try:
+        status_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏳ Sto scaricando... attendi un momento"
+        )
+    except Exception as e:
+        logger.error(f"Errore invio status: {e}")
+        return
     
     try:
         # Scarica il video con retry
@@ -127,7 +136,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Cancella messaggio di errore silenziosamente dopo 3 secondi
             try:
                 await asyncio.sleep(3)
-                await status_msg.delete()
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             except:
                 pass
             return
@@ -164,7 +173,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Invia il video
         if os.path.exists(file_path):
             with open(file_path, 'rb') as video_file:
-                await update.message.reply_video(
+                await context.bot.send_video(
+                    chat_id=chat_id,
                     video=video_file,
                     caption=caption,
                     parse_mode=ParseMode.HTML
@@ -172,7 +182,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Cancella il messaggio di status
             try:
-                await status_msg.delete()
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             except:
                 pass
             
@@ -185,7 +195,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # File non trovato - cancella status silenziosamente
             try:
                 await asyncio.sleep(2)
-                await status_msg.delete()
+                await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
             except:
                 pass
     
@@ -194,7 +204,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Cancella il messaggio di status silenziosamente
         try:
             await asyncio.sleep(2)
-            await status_msg.delete()
+            await context.bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         except:
             pass
 
