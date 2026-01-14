@@ -1,5 +1,5 @@
-python-telegram-bot==20.8
-python-dotenv==1.0.0
-requests==2.31.0
-yt-dlp>=2023.11.15
-aiohttp>=3.9.0
+yt-dlp
+python-telegram-bot[job-queue]
+python-dotenv
+requests
+aiohttp

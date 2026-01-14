@@ -100,9 +100,13 @@ async def get_top_3_users() -> list:
 
 
 async def send_weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
-    """Invia il ranking settimanale ogni sabato alle 20:30"""
+    """Invia il ranking settimanale"""
     try:
         logger.info("Invio ranking settimanale...")
+        
+        if not CHAT_ID:
+            logger.warning("CHAT_ID non configurato, ranking disabilitato")
+            return
         
         if not user_downloads:
             logger.info("Nessun download questa settimana")
@@ -149,60 +153,10 @@ async def send_weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         # Azzera i contatori per la prossima settimana
         user_downloads.clear()
         user_names.clear()
-        logger.info("Ranking inviato. Contatori azzerati.")
+        logger.info("✅ Ranking inviato. Contatori azzerati.")
         
     except Exception as e:
         logger.error(f"Errore nell'invio ranking: {str(e)}")
-
-
-async def schedule_weekly_ranking(application: Application):
-    """Pianifica l'invio del ranking ogni sabato alle 20:30"""
-    if not RANKING_ENABLED:
-        logger.info("⚠️ Ranking disabilitato (CHAT_ID non configurato)")
-        return
-    
-    while True:
-        try:
-            now = datetime.now()
-            
-            # Calcola il prossimo sabato alle 20:30
-            # 0=lunedì, 5=sabato
-            days_until_saturday = (5 - now.weekday()) % 7
-            
-            if days_until_saturday == 0:
-                # Oggi è sabato
-                target_time = time(20, 30, 0)
-                if now.time() < target_time:
-                    # Non è ancora passata l'ora oggi
-                    target_datetime = datetime.combine(now.date(), target_time)
-                else:
-                    # È già passata, attendi al prossimo sabato
-                    target_datetime = datetime.combine(
-                        now.date() + timedelta(days=7),
-                        target_time
-                    )
-            else:
-                # Calcola il prossimo sabato
-                target_datetime = datetime.combine(
-                    now.date() + timedelta(days=days_until_saturday),
-                    time(20, 30, 0)
-                )
-            
-            wait_seconds = (target_datetime - now).total_seconds()
-            hours_wait = wait_seconds / 3600
-            logger.info(f"Prossimo ranking tra {hours_wait:.1f} ore ({target_datetime})")
-            
-            await asyncio.sleep(wait_seconds)
-            
-            # Invia il ranking
-            await send_weekly_ranking(application)
-            
-            # Attendi un minuto per evitare duplicati
-            await asyncio.sleep(60)
-            
-        except Exception as e:
-            logger.error(f"Errore scheduling ranking: {str(e)}")
-            await asyncio.sleep(3600)  # Riprova tra 1 ora
 
 
 # ===== COMMAND HANDLERS =====
@@ -419,17 +373,10 @@ def main():
         download_handler
     ))
     
-    # Avvia il ranking settimanale se abilitato
     if RANKING_ENABLED:
-        # Usa job queue per schedulare il ranking
-        application.job_queue.run_repeating(
-            callback=lambda context: asyncio.create_task(send_weekly_ranking(context)),
-            interval=60 * 60,  # Controlla ogni ora
-            first=10  # Aspetta 10 secondi prima del primo check
-        )
-        logger.info("✅ Ranking settimanale pianificato")
+        logger.info("✅ Ranking settimanale abilitato")
     else:
-        logger.info("⚠️ Ranking disabilitato (CHAT_ID non configurato)")
+        logger.info("⚠️  Ranking disabilitato (CHAT_ID non configurato)")
     
     logger.info("🤖 Bot Telegram avviato...")
     
