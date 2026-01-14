@@ -14,7 +14,6 @@ class TikTokDownloader:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
 
-        # Cookie dedicati TikTok (opzionale)
         self.tiktok_cookies = os.path.join(os.path.dirname(__file__), "tiktok_cookies.txt")
 
         self.user_agents = [
@@ -25,14 +24,12 @@ class TikTokDownloader:
 
         self.ydl_opts = {
             "format": "best[ext=mp4]/best",
-            # filename corto (evita Errno 36)
             "outtmpl": os.path.join(self.temp_dir, "tiktok_%(id)s.%(ext)s"),
             "paths": {"home": self.temp_dir},
             "quiet": True,
             "no_warnings": True,
             "extractaudio": False,
             "max_filesize": 50 * 1024 * 1024,
-
             "retries": 3,
             "fragment_retries": 3,
             "socket_timeout": 30,
@@ -41,7 +38,6 @@ class TikTokDownloader:
             "forceipv4": True,
             "restrictfilenames": True,
             "nopart": True,
-
             "http_headers": {
                 "User-Agent": self._ua(),
                 "Referer": "https://www.tiktok.com/",
@@ -97,7 +93,7 @@ class TikTokDownloader:
             return await loop.run_in_executor(None, _extract)
 
         except Exception as e:
-            logger.error(f"Errore nell'estrazione info per {url}: {str(e)[:200]}")
+            logger.error(f"Errore estrazione info TikTok {url}: {str(e)[:200]}")
             return None
 
     async def download_with_ytdlp(self, url: str) -> Optional[str]:
@@ -128,7 +124,7 @@ class TikTokDownloader:
             return None
 
         except Exception as e:
-            logger.error(f"Errore yt-dlp per {url}: {str(e)[:200]}")
+            logger.error(f"Errore yt-dlp TikTok {url}: {str(e)[:200]}")
             return None
 
     def clean_tiktok_url(self, url: str) -> str:
