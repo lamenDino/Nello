@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v5.1
+Social Media Downloader v5.2
 - VIDEO + CAROSELLO FOTO
 - Instagram /p/: estrazione carousel robusta senza dipendere da "formats"
 - Fix "File name too long": output corto
+- TikTok: usa cookies da ttcookies.txt se presenti
 - TikTok /photo/: best-effort conversione in /video/
 """
 
@@ -12,7 +13,7 @@ import re
 import asyncio
 import logging
 import tempfile
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List
 
 import yt_dlp
 import requests
@@ -24,8 +25,12 @@ class SocialMediaDownloader:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
 
-        self.instagram_cookies = os.path.join(os.path.dirname(__file__), "cookies.txt")
-        self.youtube_cookies = os.path.join(os.path.dirname(__file__), "youtube_cookies.txt")
+        base_dir = os.path.dirname(__file__)
+
+        # Cookie files
+        self.instagram_cookies = os.path.join(base_dir, "cookies.txt")
+        self.youtube_cookies = os.path.join(base_dir, "youtube_cookies.txt")
+        self.tiktok_cookies = os.path.join(base_dir, "ttcookies.txt")  # <-- NUOVO
 
         self.user_agents = [
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1",
@@ -127,9 +132,11 @@ class SocialMediaDownloader:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
+        # Instagram cookies
         if "instagram" in url.lower() and os.path.exists(self.instagram_cookies):
             opts["cookiefile"] = self.instagram_cookies
 
+        # YouTube cookies + headers
         if "youtube" in url.lower() or "youtu.be" in url.lower():
             if attempt == 0 and os.path.exists(self.youtube_cookies):
                 opts["cookiefile"] = self.youtube_cookies
@@ -137,15 +144,19 @@ class SocialMediaDownloader:
                 {"Referer": "https://www.youtube.com/", "Origin": "https://www.youtube.com"}
             )
 
+        # Facebook headers
         if "facebook" in url.lower():
             opts["http_headers"].update(
                 {"Referer": "https://www.facebook.com/", "Origin": "https://www.facebook.com"}
             )
 
+        # TikTok headers + cookies (NUOVO)
         if "tiktok" in url.lower():
             opts["http_headers"].update(
                 {"Referer": "https://www.tiktok.com/", "Origin": "https://www.tiktok.com"}
             )
+            if os.path.exists(self.tiktok_cookies):
+                opts["cookiefile"] = self.tiktok_cookies
 
         return opts
 
@@ -153,7 +164,7 @@ class SocialMediaDownloader:
         try:
             opts = self.get_ydl_opts(url, attempt)
             opts["skip_download"] = True
-            # importantissimo per IG carousel: non far crashare se non ci sono formats
+            # importante per IG carousel: non far crashare se non ci sono formats
             opts["ignore_no_formats_error"] = True
 
             loop = asyncio.get_event_loop()
@@ -204,14 +215,14 @@ class SocialMediaDownloader:
     def _pick_best_thumbnail_url(self, thumbnails: List[Dict]) -> Optional[str]:
         if not thumbnails:
             return None
-        # scegli la thumbnail con width più grande (o l'ultima se manca width)
+
         def score(t):
             return t.get("width") or 0
+
         thumbs = sorted(thumbnails, key=score)
         return thumbs[-1].get("url")
 
     def _guess_ext(self, url: str, fallback: str = ".jpg") -> str:
-        # tenta di ricavare l'estensione dall'url
         u = url.lower()
         for ext in [".jpg", ".jpeg", ".png", ".webp"]:
             if ext in u:
@@ -243,7 +254,6 @@ class SocialMediaDownloader:
             if not item:
                 return
 
-            # se è proprio un'immagine con url diretto
             ext = (item.get("ext") or "").lower()
             direct_url = item.get("url")
 
@@ -251,22 +261,18 @@ class SocialMediaDownloader:
                 urls.append(direct_url)
                 return
 
-            # altrimenti prova thumbnails (tipico di IG)
             thumbs = item.get("thumbnails") or []
             turl = self._pick_best_thumbnail_url(thumbs)
             if turl:
                 urls.append(turl)
 
-        # IG carousel spesso ha entries
         entries = info.get("entries") or []
         if entries:
             for e in entries:
                 handle_item(e)
         else:
-            # fallback sul root info
             handle_item(info)
 
-        # dedup mantenendo ordine
         seen = set()
         out = []
         for u in urls:
@@ -318,7 +324,7 @@ class SocialMediaDownloader:
                 title = info.get("title") or "N/A"
                 uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Sconosciuto"
 
-                # ===== INSTAGRAM /p/ => SOLO CAROSELLO FOTO =====
+                # Instagram /p/ => carousel foto
                 if platform == "instagram" and "/p/" in clean_url.lower():
                     files = await self.download_instagram_carousel(clean_url, attempt)
                     if files:
@@ -337,7 +343,7 @@ class SocialMediaDownloader:
                         continue
                     return {"success": False}
 
-                # ===== VIDEO standard =====
+                # Video standard
                 file_path = await self.download_with_ytdlp(clean_url, attempt)
                 if file_path and os.path.exists(file_path):
                     return {
