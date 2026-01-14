@@ -1,93 +1,91 @@
+#!/usr/bin/env python3
 """
-File di configurazione per il bot TikTok
+Configurazione Bot Telegram Downloader Video
+
+IMPORTANTE: Impostare queste variabili prima di avviare il bot!
 """
 
 import os
 from dotenv import load_dotenv
 
-# Carica le variabili d'ambiente
+# Carica variabili da .env
 load_dotenv()
 
-# Configurazioni bot
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
+# ===== TELEGRAM BOT TOKEN =====
+# Ottieni da @BotFather su Telegram
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 
-# Configurazioni TikTok downloader
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (limite Telegram)
-MAX_VIDEO_DURATION = 600  # 10 minuti massimo
-TEMP_DIR = os.getenv('TEMP_DIR', '/tmp')
+if not TOKEN:
+    raise ValueError(
+        "❌ TELEGRAM_BOT_TOKEN non configurato!\n"
+        "Crea un file .env con:\n"
+        "TELEGRAM_BOT_TOKEN=il_tuo_token_qui\n"
+        "CHAT_ID=id_della_chat"
+    )
 
-# Configurazioni logging
+# ===== CHAT ID (dove inviare il ranking) =====
+# Ottieni con @userinfobot
+CHAT_ID = os.getenv('CHAT_ID', '')
+
+if not CHAT_ID:
+    raise ValueError(
+        "❌ CHAT_ID non configurato!\n"
+        "Ottieni il tuo ID con @userinfobot e aggiungi a .env:\n"
+        "CHAT_ID=il_tuo_id_numerico"
+    )
+
+try:
+    CHAT_ID = int(CHAT_ID)
+except ValueError:
+    raise ValueError("❌ CHAT_ID deve essere un numero intero!")
+
+# ===== CONFIGURAZIONE LOGGING =====
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-LOG_FILE = os.getenv('LOG_FILE', 'bot.log')
 
-# Lista degli utenti autorizzati (IDs Telegram)
-# Lascia vuoto [] per permettere a tutti, oppure aggiungi gli ID degli amici
-AUTHORIZED_USERS = [
-    # 123456789,  # ID Telegram del primo amico
-    # 987654321,  # ID Telegram del secondo amico
-    # Aggiungi altri ID qui...
-]
+# ===== CONFIGURAZIONE DOWNLOAD =====
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+TIMEOUT_DOWNLOAD = 120  # secondi
 
-# Se la lista è vuota, il bot sarà accessibile a tutti
-ALLOW_ALL_USERS = len(AUTHORIZED_USERS) == 0
+# ===== CONFIGURAZIONE RETRY =====
+MAX_RETRIES = 3  # Numero massimo di tentativi
+RETRY_DELAY = 2  # Delay iniziale in secondi (backoff: 2, 4, 8)
 
-# Configurazioni rate limiting
-MAX_DOWNLOADS_PER_USER_PER_HOUR = 10
-RATE_LIMIT_ENABLED = True
+# ===== CONFIGURAZIONE RANKING SETTIMANALE =====
+RANKING_DAY = 5  # 0=lunedì, 5=sabato
+RANKING_TIME = (20, 30)  # Ore, minuti (20:30)
 
-# Messaggi personalizzati
-WELCOME_MESSAGE = """
-🎵 **Ciao {name}!** 
+# ===== DIRECTORIES =====
+TEMP_DIR = os.path.join(os.path.expanduser('~'), '.social_downloader_temp')
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-Sono il bot del gruppo per scaricare video TikTok! 🚀
+# Crea .env di esempio se non esiste
+def create_env_template():
+    """Crea un file .env.example con le variabili necessarie"""
+    env_example = """# Bot Telegram Downloader Video - Configurazione
+# Copia questo file a .env e riempilo con i tuoi dati
 
-**Come usarmi:**
-• Invia semplicemente il link di un video TikTok
-• Riceverai il video senza watermark direttamente qui!
+# Token del bot (ottieni da @BotFather)
+TELEGRAM_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh
 
-⚠️ **Nota:** Uso consentito solo per il nostro gruppo di amici!
+# ID della chat dove inviare il ranking (ottieni da @userinfobot)
+CHAT_ID=1234567890
+
+# Livello di logging
+LOG_LEVEL=INFO
+
+# Porta per web server (usato da Render)
+PORT=8443
 """
-
-UNAUTHORIZED_MESSAGE = """
-🚫 **Accesso negato**
-
-Questo bot è riservato solo al nostro gruppo di amici.
-Se pensi che ci sia un errore, contatta l'amministratore.
-"""
-
-ERROR_MESSAGE = """
-💥 Ops! Qualcosa è andato storto.
-
-Possibili cause:
-• Video privato o non disponibile
-• Link non valido
-• Video troppo grande (max 50MB)
-• Problemi temporanei di rete
-
-Riprova tra un momento! 🔄
-"""
-
-# Configurazioni deployment
-PORT = int(os.getenv('PORT', 8080))
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
-USE_WEBHOOK = bool(WEBHOOK_URL)
-
-# Configurazioni database (opzionale, per statistiche future)
-DATABASE_URL = os.getenv('DATABASE_URL', '')
-USE_DATABASE = bool(DATABASE_URL)
-
-def validate_config():
-    """Valida la configurazione all'avvio"""
-    errors = []
     
-    if not BOT_TOKEN:
-        errors.append("TELEGRAM_BOT_TOKEN mancante")
-    
-    if not ADMIN_USER_ID:
-        errors.append("ADMIN_USER_ID mancante")
-    
-    if errors:
-        raise ValueError(f"Errori di configurazione: {', '.join(errors)}")
-    
-    return True
+    if not os.path.exists('.env.example'):
+        with open('.env.example', 'w') as f:
+            f.write(env_example)
+        print("✅ File .env.example creato. Copia a .env e riempi i dati!")
+
+if __name__ == '__main__':
+    create_env_template()
+    print(f"✅ Configurazione caricata:")
+    print(f"   TOKEN: {'✓ configurato' if TOKEN else '✗ NON configurato'}")
+    print(f"   CHAT_ID: {CHAT_ID}")
+    print(f"   MAX_RETRIES: {MAX_RETRIES}")
+    print(f"   RANKING: Ogni {'sabato' if RANKING_DAY == 5 else 'altro giorno'} alle {RANKING_TIME[0]:02d}:{RANKING_TIME[1]:02d}")

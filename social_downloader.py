@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Social Media Downloader v3.2 - FIXATO YouTube Shorts + Facebook Reels
+Social Media Downloader v3.3
 - YouTube Shorts: Contorna bot detection con headers e proxy
 - Facebook Reels: Retry con user-agent alternati
-- Instagram: Fix completo da v3.1
+- Instagram: Fix completo con cookies
+- TikTok: Gestione URL short
+- Twitter/X: Supporto video
 - Gestione errori robusta per tutte le piattaforme
+- RETRY AUTOMATICI: 3 tentativi con backoff esponenziale
 """
 
 import os
 import asyncio
 import logging
 import tempfile
-import time
+import subprocess
 from typing import Dict, Optional
 import yt_dlp
 import requests
-import subprocess
 
 logger = logging.getLogger(__name__)
+
 
 class SocialMediaDownloader:
     def __init__(self):
@@ -36,6 +39,7 @@ class SocialMediaDownloader:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1',
+            'Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
         ]
         
         self.base_opts = {
@@ -47,9 +51,12 @@ class SocialMediaDownloader:
             'max_filesize': 50 * 1024 * 1024,
         }
         
-        self.max_retries = 3
-        self.retry_delay = 2
-    
+        # ===== CONFIGURAZIONE RETRY =====
+        self.max_retries = 3          # Massimo 3 tentativi
+        self.retry_delay = 2          # Delay iniziale in secondi (2, 4, 8)
+        
+        logger.info("SocialMediaDownloader inizializzato con max_retries=3")
+
     def check_ytdlp_version(self):
         """Controlla e aggiorna yt-dlp"""
         try:
@@ -62,6 +69,7 @@ class SocialMediaDownloader:
             version = result.stdout.strip()
             logger.info(f"yt-dlp versione: {version}")
             
+            # Aggiorna yt-dlp
             logger.info("Aggiornamento yt-dlp...")
             subprocess.run(
                 ['pip', 'install', '--upgrade', 'yt-dlp'],
@@ -70,12 +78,12 @@ class SocialMediaDownloader:
             )
         except Exception as e:
             logger.warning(f"Errore check yt-dlp: {e}")
-    
+
     def get_random_user_agent(self) -> str:
         """Ritorna un user-agent random"""
         import random
         return random.choice(self.user_agents)
-    
+
     def get_ydl_opts(self, url: str, attempt: int = 0) -> Dict:
         """Ottiene opzioni yt-dlp personalizzate per piattaforma"""
         opts = self.base_opts.copy()
@@ -122,10 +130,17 @@ class SocialMediaDownloader:
                 'Origin': 'https://www.tiktok.com',
             })
         
+        # Twitter/X
+        if 'twitter' in url.lower() or 'x.com' in url.lower():
+            opts['http_headers'].update({
+                'Referer': 'https://twitter.com/',
+                'Origin': 'https://twitter.com',
+            })
+        
         return opts
-    
+
     async def download_video(self, url: str) -> Dict:
-        """Download principale con retry per tutte le piattaforme"""
+        """Download principale con RETRY per tutte le piattaforme"""
         
         # Controlla foto Instagram
         if 'instagram' in url.lower() and '/p/' in url.lower():
@@ -136,7 +151,7 @@ class SocialMediaDownloader:
                     'error': '📸 Questo è un POST/FOTO Instagram, non un video!'
                 }
         
-        # Retry loop
+        # ===== RETRY LOOP - 3 TENTATIVI =====
         for attempt in range(self.max_retries):
             try:
                 clean_url = self.clean_url(url)
@@ -149,7 +164,7 @@ class SocialMediaDownloader:
                 if not info:
                     if attempt < self.max_retries - 1:
                         delay = self.retry_delay * (2 ** attempt)
-                        logger.info(f"Retry {attempt + 1} dopo {delay}s")
+                        logger.info(f"Info extraction fallita. Retry {attempt + 1} dopo {delay}s")
                         await asyncio.sleep(delay)
                         continue
                     else:
@@ -163,7 +178,7 @@ class SocialMediaDownloader:
                 if not file_path or not os.path.exists(file_path):
                     if attempt < self.max_retries - 1:
                         delay = self.retry_delay * (2 ** attempt)
-                        logger.info(f"Download retry {attempt + 1} dopo {delay}s")
+                        logger.info(f"Download fallito. Retry {attempt + 1} dopo {delay}s")
                         await asyncio.sleep(delay)
                         continue
                     else:
@@ -177,6 +192,7 @@ class SocialMediaDownloader:
                 if not uploader or uploader == 'Sconosciuto':
                     uploader = info.get('channel', info.get('creator', 'Utente Anonimo'))
                 
+                logger.info(f"✅ Download riuscito al tentativo {attempt + 1}")
                 return {
                     'success': True,
                     'file_path': file_path,
@@ -189,7 +205,7 @@ class SocialMediaDownloader:
             
             except Exception as e:
                 error_str = str(e).lower()
-                logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
+                logger.error(f"Tentativo {attempt + 1} eccezione: {str(e)[:200]}")
                 
                 # Gestisci errori specifici
                 if 'sign in' in error_str or 'bot' in error_str:
@@ -208,15 +224,18 @@ class SocialMediaDownloader:
                         'error': '🔒 Video privato o inaccessibile.'
                     }
                 
+                # Retry
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
+                    logger.info(f"Attesa {delay}s prima del tentativo {attempt + 2}")
                     await asyncio.sleep(delay)
         
+        # Tutti i tentativi esauriti
         return {
             'success': False,
-            'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'
+            'error': '❌ Download fallito dopo 3 tentativi. Riprova più tardi.'
         }
-    
+
     async def check_if_video(self, url: str) -> bool:
         """Verifica se è video o foto Instagram"""
         try:
@@ -225,7 +244,6 @@ class SocialMediaDownloader:
             def _check():
                 opts = self.get_ydl_opts(url)
                 opts['skip_download'] = True
-                
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     formats = info.get('formats', [])
@@ -234,13 +252,12 @@ class SocialMediaDownloader:
             return await loop.run_in_executor(None, _check)
         except:
             return True
-    
+
     async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
         """Estrae info video"""
         try:
             opts = self.get_ydl_opts(url, attempt)
             opts['skip_download'] = True
-            
             loop = asyncio.get_event_loop()
             
             def _extract():
@@ -258,7 +275,6 @@ class SocialMediaDownloader:
                 try:
                     opts = self.get_ydl_opts(url, attempt + 1)
                     opts['skip_download'] = True
-                    
                     loop = asyncio.get_event_loop()
                     
                     def _extract_alt():
@@ -271,7 +287,7 @@ class SocialMediaDownloader:
                     pass
             
             return None
-    
+
     async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
         """Download con yt-dlp"""
         try:
@@ -302,7 +318,7 @@ class SocialMediaDownloader:
         except Exception as e:
             logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
             return None
-    
+
     def clean_url(self, url: str) -> str:
         """Pulisce URL"""
         url = url.strip()
@@ -338,10 +354,11 @@ class SocialMediaDownloader:
             url = url.split('?')[0]
         
         return url
-    
+
     def detect_platform(self, url: str) -> str:
         """Rileva piattaforma"""
         url_lower = url.lower()
+        
         if 'tiktok' in url_lower:
             return 'tiktok'
         elif 'instagram' in url_lower or 'ig.tv' in url_lower:
@@ -352,8 +369,9 @@ class SocialMediaDownloader:
             return 'youtube'
         elif 'twitter' in url_lower or 'x.com' in url_lower:
             return 'twitter'
+        
         return 'unknown'
-    
+
     def get_error_message_for_platform(self, platform: str, error_type: str) -> str:
         """Messaggio errore personalizzato per piattaforma"""
         messages = {
@@ -373,6 +391,10 @@ class SocialMediaDownloader:
                 'extraction_failed': '⚠️ Errore nel caricamento da TikTok.',
                 'download_failed': '🔒 Video TikTok non disponibile.',
             },
+            'twitter': {
+                'extraction_failed': '⚠️ Errore nel caricamento da Twitter/X.',
+                'download_failed': '🔒 Video Twitter/X non disponibile.',
+            }
         }
         
         return messages.get(platform, {}).get(error_type, '❌ Errore nel download.')
