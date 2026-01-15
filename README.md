@@ -1,43 +1,30 @@
-# Telegram Multi-Platform Video Downloader Bot (Video + Caroselli)
+# Telegram MultiPlatform Video Downloader Bot
 
-Bot Telegram che scarica contenuti da più piattaforme usando `yt-dlp` e li ripubblica nel gruppo con un formato fisso.
+Bot Telegram per scaricare video da TikTok, Instagram e Facebook usando `yt-dlp`.
 
-Supporta:
-- TikTok
-- Instagram (Reels + caroselli foto quando estraibili)
-- Facebook (Video/Reels + link share)
-- YouTube (Shorts)
-- Twitter / X
+## Setup
 
-Include inoltre:
-- Retry “silenzioso”: se fallisce, riprova e NON invia messaggi d’errore
-- Ranking settimanale TOP 3 con badge 🥇🥈🥉 (ogni sabato alle 20:00 Europe/Rome)
-- Deploy pronto per Render via Docker
+1. Crea file `.env`:
+   ```
+   TELEGRAM_BOT_TOKEN=il_tuo_token_bot
+   ADMIN_USER_ID=il_tuo_id_telegram
+   PORT=8080
+   ```
 
----
+2. Installa dipendenze:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## Formato messaggio in uscita
+## Deploy su Render
 
-Il bot pubblica:
+- Tipo di servizio: Web Service
+- Espone porta definita da `PORT`
+- Start command:
+  ```
+  python bot.py
+  ```
 
-🎵 Video da :  
-👤 Video inviato da :  
-🔗 Link originale :  
-📝 Meta info video :
+## Uso
 
----
-
-## Configurazione
-
-Variabili d’ambiente (Render → Environment):
-
-- `TELEGRAM_BOT_TOKEN` (obbligatoria)
-- `PORT` (default 8080)
-
-Esempio `.env.example`:
-
-```env
-TELEGRAM_BOT_TOKEN=
-PORT=8080
-LOG_LEVEL=INFO
-TEMP_DIR=/tmp
+Invia un link da TikTok, Instagram o Facebook al bot. Verrà cancellato il messaggio originale, scaricato il video e inviato con didascalia che include la piattaforma di origine.

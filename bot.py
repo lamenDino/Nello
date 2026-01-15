@@ -16,9 +16,10 @@ from datetime import time
 from collections import defaultdict
 
 from aiohttp import web
-from telegram import Update, InputMediaPhoto
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.helpers import escape
+from telegram import InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -153,6 +154,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             # Telegram: max 10 media in un media_group
+            # Se vuoi, puoi aumentare spezzando in più album.
             MAX_GROUP = 10
             chunks = [files[i:i + MAX_GROUP] for i in range(0, len(files), MAX_GROUP)]
 
@@ -266,7 +268,6 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler)
     )
 
-    # sabato alle 20:00 (days: Sunday=0 ... Saturday=6)
     application.job_queue.run_daily(
         weekly_ranking,
         time=time(hour=20, minute=0),
