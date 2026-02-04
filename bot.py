@@ -167,28 +167,28 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f = open(photo_path, "rb")
                         opened.append((f, photo_path))
 
-                            # Caption solo sul primo media del primo chunk
-                            ext = os.path.splitext(photo_path)[1].lower()
-                            is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+                        # Caption solo sul primo media del primo chunk
+                        ext = os.path.splitext(photo_path)[1].lower()
+                        is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
 
-                            if chunk_index == 0 and i == 0:
-                                if is_video:
-                                    media.append(InputMediaVideo(
-                                        media=f,
-                                        caption=caption,
-                                        parse_mode=ParseMode.HTML
-                                    ))
-                                else:
-                                    media.append(InputMediaPhoto(
-                                        media=f,
-                                        caption=caption,
-                                        parse_mode=ParseMode.HTML
-                                    ))
+                        if chunk_index == 0 and i == 0:
+                            if is_video:
+                                media.append(InputMediaVideo(
+                                    media=f,
+                                    caption=caption,
+                                    parse_mode=ParseMode.HTML
+                                ))
                             else:
-                                if is_video:
-                                    media.append(InputMediaVideo(media=f))
-                                else:
-                                    media.append(InputMediaPhoto(media=f))
+                                media.append(InputMediaPhoto(
+                                    media=f,
+                                    caption=caption,
+                                    parse_mode=ParseMode.HTML
+                                ))
+                        else:
+                            if is_video:
+                                media.append(InputMediaVideo(media=f))
+                            else:
+                                media.append(InputMediaPhoto(media=f))
 
                     await context.bot.send_media_group(
                         chat_id=msg.chat_id,
