@@ -27,6 +27,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from social_downloader import SocialMediaDownloader
 
@@ -88,6 +89,7 @@ def detect_platform(url: str) -> str:
 # =========================
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /start from {update.effective_user.id}")
     await update.message.reply_text("Mandami un link video e penso io a tutto 🔥")
 
 # =========================
@@ -97,6 +99,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     url = msg.text.strip()
+    logger.info(f"Received message from {update.effective_user.id}: {url}")
 
     if not is_supported_link(url):
         return
@@ -108,8 +111,18 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await dl.download_video(url)
 
-        # ❌ fallimento → silenzio totale
+        # ❌ fallimento → informa l'utente e silenzio totale
         if not info or not info.get("success"):
+            try:
+                await context.bot.send_message(
+                    chat_id=msg.chat_id,
+                    text=("❌ Non sono riuscito a scaricare il contenuto. "
+                          "Potrebbe essere privato, richiedere autenticazione (cookies) o essere bloccato per IP. "
+                          "Se è un TikTok prova ad aggiungere cookies aggiornati in `tiktok_cookies.txt` o usa una VPN."),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
             await loading.delete()
             return
 
@@ -153,6 +166,54 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await loading.delete()
                 return
 
+            # Se è un solo file, inviamolo come media singolo (send_media_group richiede 2-10 elementi)
+            if len(files) == 1:
+                photo_path = files[0]
+                ext = os.path.splitext(photo_path)[1].lower()
+                is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+                
+                try:
+                    with open(photo_path, "rb") as f:
+                        if is_video:
+                            await context.bot.send_video(
+                                chat_id=msg.chat_id,
+                                video=f,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            )
+                        else:
+                            await context.bot.send_photo(
+                                chat_id=msg.chat_id,
+                                photo=f,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML
+                            )
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if 'caption' in err_str and 'too long' in err_str:
+                         logger.warning("Caption too long for single item, truncating...")
+                         short_caption = caption[:950] + "..."
+                         try:
+                             with open(photo_path, "rb") as f:
+                                if is_video:
+                                    await context.bot.send_video(chat_id=msg.chat_id, video=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                                else:
+                                    await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                         except Exception as inner_e:
+                             logger.error(f"Error sending single item matching caption retry: {inner_e}")
+                             await msg.reply_text("⚠️ Errore nell'invio (errore imprevisto).")
+                    else:
+                        logger.error(f"Error sending single carousel item: {e}")
+                        await msg.reply_text("⚠️ Errore nell'invio del media.")
+                finally:
+                     try:
+                        os.remove(photo_path)
+                     except:
+                        pass
+                
+                await loading.delete()
+                return
+
             # Telegram: max 10 media in un media_group
             # Se vuoi, puoi aumentare spezzando in più album.
             MAX_GROUP = 10
@@ -190,10 +251,32 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             else:
                                 media.append(InputMediaPhoto(media=f))
 
-                    await context.bot.send_media_group(
-                        chat_id=msg.chat_id,
-                        media=media
-                    )
+                    try:
+                        await context.bot.send_media_group(
+                            chat_id=msg.chat_id,
+                            media=media
+                        )
+                    except Exception as e:
+                       # Handle "caption too long" specifically
+                       err_str = str(e).lower()
+                       if 'caption' in err_str and 'too long' in err_str:
+                           logger.warning("Caption too long, truncating and retrying...")
+                           # Truncate caption on the first item
+                           if len(media) > 0:
+                               short_caption = caption[:950] + "..."
+                               media[0].caption = short_caption
+                               
+                               try:
+                                   await context.bot.send_media_group(
+                                        chat_id=msg.chat_id,
+                                        media=media
+                                   )
+                               except Exception as inner_e:
+                                   logger.error(f"Failed retry sending media group: {inner_e}")
+                                   await msg.reply_text("⚠️ Errore nell'invio (didascalia troppo lunga).")
+                       else:
+                            logger.error(f"Send media group error: {e}")
+                            await msg.reply_text("⚠️ Errore nell'invio dell'album.")
 
                 finally:
                     # Chiudi handle e cancella file
@@ -210,7 +293,11 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await loading.delete()
 
     except Exception as e:
-        logger.error(f"Errore critico: {e}")
+        logger.error(f"Errore critico: {e}", exc_info=True)
+        try:
+            await msg.reply_text("❌ Si è verificato un errore imprevisto durante l'elaborazione.")
+        except Exception:
+            pass
         try:
             await loading.delete()
         except Exception:
@@ -292,12 +379,22 @@ def main():
     WEBHOOK_URL = os.getenv('WEBHOOK_URL')
     WEBHOOK_PATH = os.getenv('WEBHOOK_PATH', '/')
 
-    application = Application.builder().token(TOKEN).build()
+    print("Building application...")
+    # Increase default timeouts to handle large file uploads/downloads
+    request_settings = HTTPXRequest(
+        connection_pool_size=10,
+        read_timeout=120.0,
+        write_timeout=120.0,
+        connect_timeout=60.0,
+        pool_timeout=60.0
+    )
+    application = Application.builder().token(TOKEN).request(request_settings).build()
+    print("Application built.")
 
     application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler)
-    )
+    # Log all text messages first to verify visibility
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
+    print("Handlers added.")
 
     application.job_queue.run_daily(
         weekly_ranking,
@@ -323,7 +420,12 @@ def main():
     else:
         # Start a minimal health webserver for Render and run polling
         threading.Thread(target=start_webserver, daemon=True).start()
-        application.run_polling(drop_pending_updates=True)
+        logger.info("Starting polling...")
+        application.run_polling(drop_pending_updates=False)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.exception("FATAL ERROR IN MAIN LOOP")
+        raise e

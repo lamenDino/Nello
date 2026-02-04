@@ -14,10 +14,12 @@ import asyncio
 import logging
 import tempfile
 from typing import Dict, Optional, List, Tuple
+import http.cookiejar
 
 import yt_dlp
 import requests
 import json
+import re
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,19 @@ class SocialMediaDownloader:
         # Percorsi cookies (opzionali)
         self.instagram_cookies = os.path.join(os.path.dirname(__file__), 'cookies.txt')
         self.youtube_cookies = os.path.join(os.path.dirname(__file__), 'youtube_cookies.txt')
+        self.tiktok_cookies = os.path.join(os.path.dirname(__file__), 'tiktok_cookies.txt')
+
+        # Proxy opzionale (es. http://user:pass@host:port)
+        self.proxy = (
+            os.getenv('SMD_PROXY')
+            or os.getenv('HTTPS_PROXY')
+            or os.getenv('HTTP_PROXY')
+        )
+        self.proxy = self.proxy.strip() if self.proxy else None
+        self.proxy_dict = {'http': self.proxy, 'https': self.proxy} if self.proxy else None
+        
+        # State per i fallback
+        self.last_fallback_title = None
 
         # User-Agent pool
         self.user_agents = [
@@ -59,6 +74,25 @@ class SocialMediaDownloader:
                 os.makedirs(self.debug_dir, exist_ok=True)
             except Exception:
                 pass
+
+    def _load_netscape_cookies(self, path: str) -> Optional[Dict[str, str]]:
+        if not path or not os.path.exists(path):
+            return None
+        cookies: Dict[str, str] = {}
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) >= 7:
+                        name = parts[5]
+                        value = parts[6]
+                        cookies[name] = value
+        except Exception:
+            return None
+        return cookies or None
 
     def _save_debug_info(self, note: str = '') -> Optional[str]:
         if not self.debug or not self._last_info:
@@ -94,6 +128,9 @@ class SocialMediaDownloader:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         }
 
+        if self.proxy:
+            opts['proxy'] = self.proxy
+
         # Instagram cookies
         if 'instagram' in url.lower() and os.path.exists(self.instagram_cookies):
             opts['cookiefile'] = self.instagram_cookies
@@ -122,6 +159,9 @@ class SocialMediaDownloader:
                 'Referer': 'https://www.tiktok.com/',
                 'Origin': 'https://www.tiktok.com',
             })
+            # Use cookies if available (some TikTok content requires login)
+            if os.path.exists(self.tiktok_cookies):
+                opts['cookiefile'] = self.tiktok_cookies
 
         return opts
 
@@ -136,7 +176,8 @@ class SocialMediaDownloader:
                     url,
                     allow_redirects=True,
                     timeout=10,
-                    headers={'User-Agent': self.get_random_user_agent()}
+                    headers={'User-Agent': self.get_random_user_agent()},
+                    proxies=self.proxy_dict
                 )
                 url = response.url
             except Exception:
@@ -145,13 +186,35 @@ class SocialMediaDownloader:
         # TikTok short URLs
         if 'vm.tiktok.com' in url or 'vt.tiktok.com' in url:
             try:
+                headers = {
+                    'User-Agent': self.get_random_user_agent(),
+                    'Referer': 'https://www.tiktok.com/',
+                    'Origin': 'https://www.tiktok.com'
+                }
+                cookies = self._load_netscape_cookies(self.tiktok_cookies)
+
                 response = requests.head(
                     url,
                     allow_redirects=True,
                     timeout=10,
-                    headers={'User-Agent': self.get_random_user_agent()}
+                    headers=headers,
+                    cookies=cookies,
+                    proxies=self.proxy_dict
                 )
-                url = response.url
+                if response.url and '/login' not in response.url:
+                    url = response.url
+                else:
+                    # Fallback GET se HEAD porta a /login
+                    response = requests.get(
+                        url,
+                        allow_redirects=True,
+                        timeout=15,
+                        headers=headers,
+                        cookies=cookies,
+                        proxies=self.proxy_dict
+                    )
+                    if response.url:
+                        url = response.url
             except Exception:
                 pass
 
@@ -203,21 +266,18 @@ class SocialMediaDownloader:
 
     async def extract_info(self, url: str, attempt: int = 0) -> Optional[Dict]:
         """Estrae info (senza download)"""
-        try:
-            opts = self.get_ydl_opts(url, attempt)
-            opts['skip_download'] = True
+        # Nota: rimuoviamo il try/catch interno per permettere a download_video
+        # di intercettare errori specifici (es. Unsupported URL)
+        opts = self.get_ydl_opts(url, attempt)
+        opts['skip_download'] = True
 
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
 
-            def _extract():
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    return ydl.extract_info(url, download=False)
+        def _extract():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
 
-            return await loop.run_in_executor(None, _extract)
-
-        except Exception as e:
-            logger.error(f"Extract info attempt {attempt}: {str(e)[:200]}")
-            return None
+        return await loop.run_in_executor(None, _extract)
 
     def _pick_best_image_url(self, entry: Dict) -> Optional[Tuple[str, str]]:
         """
@@ -363,7 +423,13 @@ class SocialMediaDownloader:
                 filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
 
                 try:
-                    r = requests.get(video_url, headers=headers, stream=True, timeout=60)
+                    r = requests.get(
+                        video_url,
+                        headers=headers,
+                        stream=True,
+                        timeout=60,
+                        proxies=self.proxy_dict
+                    )
                     r.raise_for_status()
                     with open(filename, "wb") as f:
                         for chunk in r.iter_content(chunk_size=1024 * 256):
@@ -397,7 +463,13 @@ class SocialMediaDownloader:
                 filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
 
                 try:
-                    r = requests.get(img_url, headers=headers, stream=True, timeout=20)
+                    r = requests.get(
+                        img_url,
+                        headers=headers,
+                        stream=True,
+                        timeout=20,
+                        proxies=self.proxy_dict
+                    )
                     r.raise_for_status()
                     with open(filename, "wb") as f:
                         for chunk in r.iter_content(chunk_size=1024 * 256):
@@ -422,27 +494,82 @@ class SocialMediaDownloader:
         Scarica la pagina HTML, estrae tutte le immagini (jpg/png/webp) e le salva.
         """
         files: List[str] = []
-        headers = {'User-Agent': self.get_random_user_agent()}
+        found_title = ""
+        self.last_fallback_title = None
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
+            'Referer': 'https://www.tiktok.com/',
+            'Origin': 'https://www.tiktok.com'
+        }
+        # Force use of ttcokies.txt if available, else tiktok_cookies.txt
+        cookie_path = os.path.join(os.path.dirname(__file__), 'ttcokies.txt')
+        if not os.path.exists(cookie_path):
+             cookie_path = self.tiktok_cookies
+        
+        cookies = self._load_netscape_cookies(cookie_path)
+        if cookies:
+             logger.info(f"Loaded {len(cookies)} cookies from {os.path.basename(cookie_path)}")
+        else:
+             logger.warning(f"No cookies loaded from {os.path.basename(cookie_path)}")
 
         try:
-            r = requests.get(url, headers=headers, timeout=15)
+            logger.info(f"TikTok Fallback: fetching {url}")
+            r = requests.get(
+                url,
+                headers=headers,
+                timeout=15,
+                cookies=cookies,
+                proxies=self.proxy_dict
+            )
+            logger.info(f"TikTok Fallback: status {r.status_code}, len {len(r.text)}")
             r.raise_for_status()
             html = r.text
+            
+            with open("tiktok_dump.html", "w", encoding="utf-8") as f:
+                f.write(html)
         except Exception as e:
             logger.warning(f"Failed fetching TikTok page for fallback: {e}")
             return files
 
         # Estrai url immagine con regex
-        import re
-        pattern = re.compile(r'https?://[^"\'>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?', re.IGNORECASE)
-        matches = pattern.findall(html)
-        uniq = []
-        for m in matches:
-            if m not in uniq:
-                uniq.append(m)
+        uniq = self._extract_tiktok_photo_urls_from_html(html)
+        logger.info(f"TikTok Fallback: found {len(uniq)} images from HTML")
+
+        # Tenta estrazione titolo da HTML (semplice)
+        try:
+            # es: <title>Video description | TikTok</title>
+            match_title = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+            if match_title:
+                t = match_title.group(1)
+                t = t.replace('| TikTok', '').strip()
+                found_title = t
+                self.last_fallback_title = t
+        except:
+            pass
+
+        if not uniq:
+             logger.info("TikTok Fallback: HTML extraction failed, trying TIKWM API...")
+             try:
+                 api_url = "https://www.tikwm.com/api/"
+                 # INCREASED COUNT TO 35 to fix split albums
+                 r = requests.post(api_url, data={'url': url, 'count': 35, 'cursor': 0, 'web': 1, 'hd': 1}, timeout=15, proxies=self.proxy_dict)
+                 if r.status_code == 200:
+                     data = r.json()
+                     if data.get('code') == 0:
+                         data_obj = data.get('data', {})
+                         images = data_obj.get('images', [])
+                         logger.info(f"TikTok Fallback: TIKWM API found {len(images)} images")
+                         uniq = images
+                         
+                         # Estrai titolo da API se presente
+                         if 'title' in data_obj:
+                             found_title = data_obj['title']
+                             self.last_fallback_title = found_title
+             except Exception as e:
+                 logger.warning(f"TikTok Fallback: TIKWM API failed: {e}")
 
         # Limita numero di immagini
-        MAX = 30
+        MAX = 35
         uniq = uniq[:MAX]
 
         for idx, img_url in enumerate(uniq, start=1):
@@ -452,7 +579,14 @@ class SocialMediaDownloader:
 
             filename = os.path.join(self.temp_dir, f"tiktok_photo_{idx}.{ext}")
             try:
-                rr = requests.get(img_url, headers=headers, stream=True, timeout=20)
+                rr = requests.get(
+                    img_url,
+                    headers=headers,
+                    stream=True,
+                    timeout=20,
+                    cookies=cookies,
+                    proxies=self.proxy_dict
+                )
                 rr.raise_for_status()
                 with open(filename, 'wb') as fh:
                     for chunk in rr.iter_content(1024 * 256):
@@ -475,6 +609,407 @@ class SocialMediaDownloader:
                     pass
 
         return files
+
+    def _extract_tiktok_photo_urls_from_html(self, html: str) -> List[str]:
+        import re
+
+        def _dedupe(items: List[str]) -> List[str]:
+            out = []
+            for x in items:
+                if x not in out:
+                    out.append(x)
+            return out
+
+        urls: List[str] = []
+
+        # 1) Prova SIGI_STATE o UNIVERSAL_DATA
+        # Pattern vecchio: window.SIGI_STATE = {...}
+        sigi_match = re.search(r'window\.__SIGI_STATE__\s*=\s*(\{.*?\})\s*;\s*</script>', html, re.DOTALL)
+        if not sigi_match:
+            # Pattern alternativo: "SIGI_STATE": {...}
+            sigi_match = re.search(r'\"SIGI_STATE\"\s*:\s*(\{.*?\})\s*,\s*\"AppContext', html, re.DOTALL)
+        if not sigi_match:
+             # Pattern script tag: <script id="SIGI_STATE">...</script>
+             sigi_match = re.search(r'<script[^>]+id="SIGI_STATE"[^>]*>(.*?)</script>', html, re.DOTALL)
+
+        # Newer TikTok structure: UNIVERSAL_DATA_FOR_REHYDRATION
+        # Pattern variabile:
+        univ_match = re.search(r'__UNIVERSAL_DATA_FOR_REHYDRATION__\s*=\s*(\{.*?\})\s*;</script>', html, re.DOTALL)
+        if not univ_match:
+            # Pattern script tag ID (più comune ora):
+            # Relaxed regex to handle spacing and ordering of attributes
+            univ_match = re.search(r'<script[^>]+id=[\'"]__UNIVERSAL_DATA_FOR_REHYDRATION__[\'"][^>]*>(.*?)</script>', html, re.DOTALL)
+
+        json_data_list = []
+        if sigi_match:
+            json_data_list.append(sigi_match.group(1))
+        if univ_match:
+            json_data_list.append(univ_match.group(1))
+            
+        logger.info(f"TikTok Fallback: extracted {len(json_data_list)} JSON blobs")
+
+        for idx_json, json_str in enumerate(json_data_list):
+            try:
+                data = json.loads(json_str)
+                
+                # DEBUG: Dump JSON to file
+                try:
+                    with open(f"tiktok_json_dump_{idx_json}.json", "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                except:
+                    pass
+
+                # Parse robusto recursive per trovare liste di url
+                def recursive_find_images(d):
+                    if isinstance(d, dict):
+                        # Pattern trovati in struttur tiktok
+                        if 'imageURL' in d and 'urlList' in d['imageURL']:
+                             urls.extend(d['imageURL']['urlList'])
+                        if 'displayImage' in d and 'urlList' in d['displayImage']:
+                             urls.extend(d['displayImage']['urlList'])
+                        
+                        for k, v in d.items():
+                            recursive_find_images(v)
+                    elif isinstance(d, list):
+                        for i in d:
+                            recursive_find_images(i)
+                
+                recursive_find_images(data)
+                logger.info(f"TikTok Fallback: JSON blob {idx_json} processed, total urls: {len(urls)}")
+            except Exception as e:
+                logger.warning(f"TikTok Fallback: JSON blob {idx_json} parse error: {e}")
+                pass
+
+        # 2) Regex generico immagini
+        # Cerca URL che sembrano immagini tiktok
+        # Spesso sono https://p16-sign-va.tiktokcdn.com/...o qualcosa del genere
+        if not urls:
+            logger.info("TikTok Fallback: No JSON data found, trying regex...")
+            # Pattern broad per URL immagini dentro stringhe
+            pattern = re.compile(r'"(https?://[^"\s]+\.(?:jpeg|jpg|png|webp)[^"]*)"', re.IGNORECASE)
+            matches = pattern.findall(html)
+            # Filtra per domini tiktok se possibile, o prendi tutto
+            for m in matches:
+                # Decodifica unicode escape se presente
+                m_dec = m.encode().decode('unicode_escape')
+                if 'tiktokcdn' in m_dec or 'tiktok' in m_dec:
+                    urls.append(m_dec)
+
+        # 3) Meta og:image come ultima risorsa
+        if not urls:
+            meta_patterns = [
+                re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+                re.compile(r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+            ]
+            for mp in meta_patterns:
+                mm = mp.findall(html)
+                urls.extend(mm)
+
+        return _dedupe(urls)
+
+    def _from_base62(self, s: str) -> int:
+        alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+        result = 0
+        for char in s:
+            result = result * 64 + alphabet.index(char)
+        return result
+
+    def _instagram_api_fallback_sync(self, url: str) -> List[str]:
+        """
+        Fallback per Instagram usando API interna e cookies.
+        Estrae media_id da shortcode e chiama endpoint info.
+        Esegue chiamate bloccanti (requests), da eseguire in executor.
+        """
+        files: List[str] = []
+        try:
+            # Estrai shortcode
+            # es: https://www.instagram.com/p/DTvEEVVCO7I/
+            match = re.search(r'instagram\.com/(?:p|reel)/([^/?#&]+)', url)
+            if not match:
+                logger.warning("Instagram API: shortcode not found")
+                return []
+            
+            shortcode = match.group(1)
+            media_id = self._from_base62(shortcode)
+            logger.info(f"Instagram API: shortcode={shortcode} -> media_id={media_id}")
+
+            api_url = f"https://www.instagram.com/api/v1/media/{media_id}/info/"
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "X-IG-App-ID": "936619743392459",
+                "Referer": url,
+            }
+
+            cookies = self._load_netscape_cookies(self.instagram_cookies)
+            if not cookies:
+                 logger.warning("Instagram API: cookies missing, cannot use API fallback")
+                 return []
+
+            r = requests.get(api_url, headers=headers, cookies=cookies, timeout=15, proxies=self.proxy_dict)
+            if r.status_code != 200:
+                logger.warning(f"Instagram API: failed with status {r.status_code}")
+                return []
+
+            data = r.json()
+            items = data.get('items', [])
+            if not items:
+                logger.warning("Instagram API: no items in response")
+                return []
+
+            item = items[0]
+            
+            # Recupera title/caption per self.last_fallback_title se serve
+            try:
+                caption = item.get('caption', {})
+                if caption:
+                    text = caption.get('text', '')
+                    if text:
+                        self.last_fallback_title = text
+            except:
+                pass
+
+            candidates_urls = []
+            
+            # Check carousel
+            if 'carousel_media' in item:
+                logger.info(f"Instagram API: found carousel with {len(item['carousel_media'])} items")
+                for media in item['carousel_media']:
+                    # Video?
+                    if 'video_versions' in media:
+                        # pick best video
+                        vids = media.get('video_versions', [])
+                        if vids:
+                            # sort by width/height/type? usually index 0 is best
+                            candidates_urls.append((vids[0]['url'], 'mp4', True))
+                    else:
+                        # Image
+                        imgs = media.get('image_versions2', {}).get('candidates', [])
+                        if imgs:
+                            candidates_urls.append((imgs[0]['url'], 'jpg', False))
+            else:
+                # Single item - FIX: handle single item directly without checking carousel_media again incorrectly
+                # Logica corretta per item singolo
+                if 'video_versions' in item:
+                    vids = item.get('video_versions', [])
+                    if vids:
+                        candidates_urls.append((vids[0]['url'], 'mp4', True))
+                else:
+                    imgs = item.get('image_versions2', {}).get('candidates', [])
+                    if imgs:
+                        candidates_urls.append((imgs[0]['url'], 'jpg', False))
+
+            # Download items
+            for idx, (media_url, ext, is_video) in enumerate(candidates_urls, start=1):
+                # Adjust ext if query param hints otherwise (like .heic?stp=dst-jpg)
+                if '.heic' in media_url and 'dst-jpg' in media_url:
+                    ext = 'jpg'
+
+                filename = os.path.join(self.temp_dir, f"insta_api_{shortcode}_{idx}.{ext}")
+                logger.info(f"Instagram API: downloading item {idx} to {filename}")
+                
+                try:
+                    rr = requests.get(media_url, headers=headers, stream=True, timeout=30, proxies=self.proxy_dict)
+                    rr.raise_for_status()
+                    with open(filename, 'wb') as f:
+                        for chunk in rr.iter_content(chunk_size=1024 * 256):
+                             if chunk:
+                                 f.write(chunk)
+                    
+                    if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                        files.append(filename)
+                except Exception as e:
+                    logger.warning(f"Instagram API: download failed for {media_url}: {e}")
+
+            return files
+
+        except Exception as e:
+            logger.warning(f"Instagram API fallback exception: {e}")
+            return files
+
+    async def _instagram_api_fallback(self, url: str) -> List[str]:
+        """Wrapper asincrono per _instagram_api_fallback_sync"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._instagram_api_fallback_sync, url)
+
+    async def _instagram_photo_fallback(self, url: str) -> List[str]:
+        """
+        Fallback per post Instagram (foto/carousel) quando non ci sono formati video.
+        Scarica la pagina HTML, estrae immagini e le salva.
+        """
+        files: List[str] = []
+        found_description = ""
+        self.last_fallback_title = None
+        headers = {
+            'User-Agent': self.get_random_user_agent(),
+            'Referer': 'https://www.instagram.com/',
+            'Origin': 'https://www.instagram.com'
+        }
+        cookies = self._load_netscape_cookies(self.instagram_cookies)
+
+        try:
+            logger.info(f"Instagram Fallback: fetching {url}")
+            r = requests.get(
+                url,
+                headers=headers,
+                timeout=15,
+                cookies=cookies,
+                proxies=self.proxy_dict
+            )
+            logger.info(f"Instagram Fallback: status {r.status_code}, len {len(r.text)}")
+            r.raise_for_status()
+            html = r.text
+            with open("insta_dump_new.html", "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as e:
+            logger.warning(f"Failed fetching Instagram page for fallback: {e}")
+            return files
+
+        uniq = self._extract_instagram_image_urls_from_html(html)
+        logger.info(f"Instagram Fallback: found {len(uniq)} images")
+        
+        # Filtra immagini spazzatura (icone, loghi 150x150, ecc.)
+        filtered = []
+        # Exclude low res, assets, and generic terms
+        exclude_terms = [
+             '150x150', '320x320', '480x480', 'p50x50', '200x200',
+             'logo', 'icon', 'thumbnail', 'sprite', 'assets', 'transparent',
+             'signin', 'signup', 'facebook', 'fb_logo', 'badge',
+             'instagram_logo', 'error', 'null', 'empty'
+        ]
+        
+        for u in uniq:
+            u_lower = u.lower()
+            if any(term in u_lower for term in exclude_terms):
+                logger.info(f"Skipping junk image: {u}")
+                continue
+            
+            # Additional heuristic: Instagram content images usually have a hash path or 'p1080x1080' or similar
+            # If it's very short or looks like a static asset, skip it.
+            if '/static/' in u_lower or 'static.cdninstagram' in u_lower:
+                 # Check if it really looks like content (usually has long hash)
+                 if len(os.path.basename(u.split('?')[0])) < 20:
+                     logger.info(f"Skipping static asset: {u}")
+                     continue
+
+            filtered.append(u)
+        uniq = filtered
+        logger.info(f"Instagram Fallback: filtered to {len(uniq)} images")
+        
+        # Tenta estrazione caption da HTML (meta tags)
+        try:
+            # es: <meta property="og:description" content="..." />
+            match_desc = re.search(r'<meta\s+property="og:description"\s+content="(.*?)"', html, re.IGNORECASE)
+            if match_desc:
+                found_description = match_desc.group(1)
+            else:
+                match_title = re.search(r'<meta\s+property="og:title"\s+content="(.*?)"', html, re.IGNORECASE)
+                if match_title:
+                   found_description = match_title.group(1)
+            
+            if found_description:
+                self.last_fallback_title = found_description
+        except:
+             pass
+
+        MAX = 30
+        uniq = uniq[:MAX]
+
+        for idx, img_url in enumerate(uniq, start=1):
+            ext = os.path.splitext(img_url.split('?')[0])[1].lstrip('.').lower() or 'jpg'
+            if ext not in ('jpg', 'jpeg', 'png', 'webp'):
+                ext = 'jpg'
+
+            filename = os.path.join(self.temp_dir, f"instagram_photo_{idx}.{ext}")
+            try:
+                rr = requests.get(
+                    img_url,
+                    headers=headers,
+                    stream=True,
+                    timeout=20,
+                    cookies=cookies,
+                    proxies=self.proxy_dict
+                )
+                rr.raise_for_status()
+                with open(filename, 'wb') as fh:
+                    for chunk in rr.iter_content(1024 * 256):
+                        if chunk:
+                            fh.write(chunk)
+                if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                    files.append(filename)
+                else:
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Failed download Instagram fallback image {img_url}: {e}")
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
+
+        return files
+
+    def _extract_instagram_image_urls_from_html(self, html: str) -> List[str]:
+        import re
+
+        def _dedupe(items: List[str]) -> List[str]:
+            out = []
+            for x in items:
+                if x not in out:
+                    out.append(x)
+            return out
+
+        def _collect_urls(obj, urls_out: List[str]):
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    _collect_urls(v, urls_out)
+            elif isinstance(obj, list):
+                for v in obj:
+                    _collect_urls(v, urls_out)
+            elif isinstance(obj, str):
+                if ('cdninstagram' in obj or 'fbcdn' in obj) and any(ext in obj for ext in ('.jpg', '.jpeg', '.png', '.webp')):
+                    urls_out.append(obj)
+
+        urls: List[str] = []
+
+        # 1) window._sharedData
+        shared_match = re.search(r'window\._sharedData\s*=\s*(\{.*?\})\s*;\s*</script>', html, re.DOTALL)
+        if shared_match:
+            try:
+                data = json.loads(shared_match.group(1))
+                _collect_urls(data, urls)
+            except Exception:
+                pass
+
+        # 2) __additionalDataLoaded
+        if not urls:
+            add_match = re.search(r'__additionalDataLoaded\([^,]+,\s*(\{.*?\})\s*\);', html, re.DOTALL)
+            if add_match:
+                try:
+                    data = json.loads(add_match.group(1))
+                    _collect_urls(data, urls)
+                except Exception:
+                    pass
+
+        # 3) Regex generico se ancora vuoto
+        if not urls:
+            pattern = re.compile(r'https?://[^"\'>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?', re.IGNORECASE)
+            urls.extend([u for u in pattern.findall(html) if 'cdninstagram' in u or 'fbcdn' in u])
+
+        # 4) Meta og:image
+        if not urls:
+            meta_patterns = [
+                re.compile(r'<meta[^>]+property=["\"]og:image["\"][^>]+content=["\"]([^"\"]+)', re.IGNORECASE),
+                re.compile(r'<meta[^>]+name=["\"]og:image["\"][^>]+content=["\"]([^"\"]+)', re.IGNORECASE),
+            ]
+            for mp in meta_patterns:
+                urls.extend(mp.findall(html))
+
+        return _dedupe(urls)
 
     async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
         """Download singolo (video) con yt-dlp"""
@@ -522,6 +1057,26 @@ class SocialMediaDownloader:
         clean_url = self.clean_url(url)
         platform = self.detect_platform(clean_url)
 
+        # TikTok photo: prova subito fallback (yt-dlp spesso non supporta /photo/)
+        if platform == 'tiktok' and '/photo/' in clean_url:
+            try:
+                files = await self._tiktok_photo_fallback(clean_url)
+                if files:
+                    return {
+                        'success': True,
+                        'type': 'carousel',
+                        'files': files,
+                        'title': 'Contenuto',
+                        'uploader': 'Sconosciuto',
+                        'platform': platform,
+                        'url': clean_url
+                    }
+            except Exception:
+                pass
+
+        force_fallback = False
+        title = 'Contenuto'
+        uploader = 'Sconosciuto'
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}: {clean_url}")
@@ -587,7 +1142,15 @@ class SocialMediaDownloader:
                     return {'success': False, 'error': '🤖 YouTube chiede autenticazione (bot detection). Riprova tra poco.'}
                 if 'cannot parse' in err or 'parse' in err:
                     return {'success': False, 'error': '⚠️ Facebook ha cambiato struttura. Riprova con un altro reel.'}
-                if 'no video formats found' in err:
+                if 'no video formats found' in err or 'unsupported url' in err:
+                    # Forza fallback foto per Instagram/TikTok quando non trova video o URL non supportato
+                    if platform in ['instagram', 'tiktok']:
+                        force_fallback = True
+                        # Non returnare qui, lascia continuare il loop e poi esegui il fallback
+                        if attempt < self.max_retries - 1:
+                            delay = self.retry_delay * (2 ** attempt)
+                            await asyncio.sleep(delay)
+                        continue
                     return {'success': False, 'error': '🔒 Contenuto privato o inaccessibile.'}
 
                 if attempt < self.max_retries - 1:
@@ -597,18 +1160,66 @@ class SocialMediaDownloader:
         # Dopo i tentativi normali, prova fallback specifici per piattaforme
         if platform == 'tiktok':
             try:
-                files = await self._tiktok_photo_fallback(clean_url)
-                if files:
+                # Explicit unpacking check
+                fallback_resp = await self._tiktok_photo_fallback(clean_url)
+                logger.info(f"DEBUG_TIKTOK: type={type(fallback_resp)}")
+                if isinstance(fallback_resp, tuple) and len(fallback_resp) == 2:
+                    res_files, res_title = fallback_resp
+                else:
+                    res_files = fallback_resp
+                    res_title = ""
+                
+                logger.info(f"DEBUG_TIKTOK: res_files type={type(res_files)}")
+                
+                if res_files:
                     return {
                         'success': True,
                         'type': 'carousel',
-                        'files': files,
-                        'title': title,
+                        'files': res_files,
+                        'title': getattr(self, 'last_fallback_title', None) or res_title if res_title else title,
                         'uploader': uploader,
                         'platform': platform,
                         'url': clean_url
                     }
             except Exception as e:
                 logger.warning(f"TikTok fallback failed: {e}")
+
+        if platform == 'instagram':
+            try:
+                # 1) Prova fallback API interna (più affidabile per caroselli)
+                api_files = await self._instagram_api_fallback(clean_url)
+                if api_files:
+                    title_to_use = getattr(self, 'last_fallback_title', None) or title
+                    return {
+                        'success': True,
+                        'type': 'carousel',
+                        'files': api_files,
+                        'title': title_to_use,
+                        'uploader': uploader,
+                        'platform': platform,
+                        'url': clean_url
+                    }
+                
+                # 2) Se API fallisce, prova scraping HTML (vecchio metodo)
+                fallback_resp = await self._instagram_photo_fallback(clean_url)
+                # Explicit unpacking
+                if isinstance(fallback_resp, tuple) and len(fallback_resp) == 2:
+                    res_files, res_desc = fallback_resp
+                else:
+                   res_files = fallback_resp
+                   res_desc = ""
+
+                if res_files:
+                    return {
+                        'success': True,
+                        'type': 'carousel',
+                        'files': res_files,
+                        'title': res_desc if res_desc else title,
+                        'uploader': uploader,
+                        'platform': platform,
+                        'url': clean_url
+                    }
+            except Exception as e:
+                logger.warning(f"Instagram fallback failed: {e}")
 
         return {'success': False, 'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'}
