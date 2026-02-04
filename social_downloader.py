@@ -17,12 +17,14 @@ from typing import Dict, Optional, List, Tuple
 
 import yt_dlp
 import requests
+import json
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
 class SocialMediaDownloader:
-    def __init__(self):
+    def __init__(self, debug: bool = False):
         self.temp_dir = tempfile.gettempdir()
 
         # Percorsi cookies (opzionali)
@@ -49,6 +51,30 @@ class SocialMediaDownloader:
 
         self.max_retries = 3
         self.retry_delay = 2
+        self.debug = bool(debug)
+        self._last_info = None
+        if self.debug:
+            self.debug_dir = os.path.join(self.temp_dir, 'smd_debug')
+            try:
+                os.makedirs(self.debug_dir, exist_ok=True)
+            except Exception:
+                pass
+
+    def _save_debug_info(self, note: str = '') -> Optional[str]:
+        if not self.debug or not self._last_info:
+            return None
+        try:
+            ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+            safe_note = ''.join([c for c in note if c.isalnum() or c in ('_', '-')])[:40]
+            fname = f"info_{ts}_{safe_note}.json" if safe_note else f"info_{ts}.json"
+            path = os.path.join(self.debug_dir, fname)
+            with open(path, 'w', encoding='utf-8') as fh:
+                json.dump(self._last_info, fh, default=str, indent=2, ensure_ascii=False)
+            logger.info(f"Saved debug info to {path}")
+            return path
+        except Exception as e:
+            logger.warning(f"Failed saving debug info: {e}")
+            return None
 
     # --------------------------
     # Helpers
@@ -220,45 +246,173 @@ class SocialMediaDownloader:
             _, fu, fext = candidates[0]
             return fu, fext
 
+        # Supporto campi immagine tipici di Instagram
+        # display_url, original_url, thumbnail, image_url
+        img_fields = [
+            ('display_url', 'jpg'),
+            ('original_url', 'jpg'),
+            ('thumbnail', 'jpg'),
+            ('thumbnail_url', 'jpg'),
+            ('image_url', 'jpg'),
+        ]
+        for key, guessed_ext in img_fields:
+            v = entry.get(key)
+            if v and isinstance(v, str) and v.startswith('http'):
+                return v, guessed_ext
+
+        # Alcuni extractor (instagram) forniscono display_resources o image_versions2
+        dr = entry.get('display_resources') or []
+        if dr and isinstance(dr, list):
+            candidates = []
+            for r in dr:
+                src = r.get('src') or r.get('url')
+                width = r.get('config_width') or r.get('width') or 0
+                if src and isinstance(src, str):
+                    candidates.append((width or 0, src))
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return candidates[0][1], 'jpg'
+
+        iv2 = entry.get('image_versions2') or {}
+        cand = iv2.get('candidates') or []
+        if cand and isinstance(cand, list):
+            candidates = []
+            for c in cand:
+                src = c.get('url')
+                width = c.get('width') or 0
+                if src:
+                    candidates.append((width, src))
+            if candidates:
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return candidates[0][1], 'jpg'
+
         return None
 
     def _is_playlist_like(self, info: Dict) -> bool:
         return isinstance(info, dict) and isinstance(info.get('entries'), list) and len(info.get('entries')) > 0
 
-    async def _download_carousel_images(self, info: Dict) -> List[str]:
+    def _pick_best_video_url(self, entry: Dict) -> Optional[Tuple[str, str]]:
         """
-        Scarica immagini da info['entries'] (carosello) e ritorna file paths.
+        Ritorna (url, ext) migliore per una singola slide video.
+        Prova entry['url'] oppure i formats. Restituisce None se non trova video.
+        """
+        video_exts = ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'ts', '3gp')
+
+        # Caso semplice: entry['url'] con estensione video
+        u = entry.get('url')
+        ext = (entry.get('ext') or '').lower()
+        if u and ext in video_exts:
+            return u, ext
+
+        # Cerca nei formats
+        formats = entry.get('formats') or []
+        candidates = []
+        for f in formats:
+            fu = f.get('url')
+            fext = (f.get('ext') or '').lower()
+            if fu and fext in video_exts:
+                score = (f.get('width') or 0) * (f.get('height') or 0)
+                score = score if score > 0 else (f.get('filesize') or 0)
+                candidates.append((score, fu, ('mp4' if fext == 'm4v' else fext)))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            _, fu, fext = candidates[0]
+            return fu, fext
+
+        # Fallback: alcuni extractor mettono video_url o video
+        for key in ('video_url', 'video', 'video_src'):
+            v = entry.get(key)
+            if v and isinstance(v, str) and v.startswith('http'):
+                guessed = os.path.splitext(v.split('?')[0])[1].lstrip('.') or 'mp4'
+                guessed = guessed if guessed in video_exts else 'mp4'
+                return v, guessed
+
+        return None
+
+    async def _download_carousel_items(self, info: Dict) -> List[str]:
+        """
+        Scarica immagini e video da info['entries'] (carosello) e ritorna file paths.
+        Gestisce slide che possono essere immagini o video.
         """
         files: List[str] = []
         entries = info.get('entries') or []
         headers = {'User-Agent': self.get_random_user_agent()}
 
         for idx, entry in enumerate(entries, start=1):
-            best = self._pick_best_image_url(entry)
-            if not best:
-                continue
-
-            img_url, ext = best
             safe_id = entry.get('id') or f"{idx}"
-            filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
 
-            try:
-                r = requests.get(img_url, headers=headers, stream=True, timeout=20)
-                r.raise_for_status()
-                with open(filename, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 256):
-                        if chunk:
-                            f.write(chunk)
+            # Determina se la slide è video
+            is_video = bool(entry.get('is_video'))
+            # Alcuni extractor non impostano is_video ma hanno formats video
+            if not is_video:
+                fmts = entry.get('formats') or []
+                for f in fmts:
+                    fext = (f.get('ext') or '').lower()
+                    if fext in ('mp4', 'webm', 'mov', 'mkv'):
+                        is_video = True
+                        break
 
-                if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                    files.append(filename)
-            except Exception as e:
-                logger.warning(f"Carousel img download failed idx={idx}: {str(e)[:120]}")
+            if is_video:
+                best = self._pick_best_video_url(entry)
+                if not best:
+                    logger.warning(f"Nessun url video trovato per slide idx={idx}")
+                    continue
+
+                video_url, ext = best
+                filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
+
                 try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except Exception:
-                    pass
+                    r = requests.get(video_url, headers=headers, stream=True, timeout=60)
+                    r.raise_for_status()
+                    with open(filename, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+
+                    if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                        files.append(filename)
+                    else:
+                        try:
+                            if os.path.exists(filename):
+                                os.remove(filename)
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    logger.warning(f"Carousel video download failed idx={idx}: {str(e)[:120]}")
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception:
+                        pass
+
+            else:
+                # Tratta come immagine
+                best = self._pick_best_image_url(entry)
+                if not best:
+                    continue
+
+                img_url, ext = best
+                filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
+
+                try:
+                    r = requests.get(img_url, headers=headers, stream=True, timeout=20)
+                    r.raise_for_status()
+                    with open(filename, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                f.write(chunk)
+
+                    if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                        files.append(filename)
+                except Exception as e:
+                    logger.warning(f"Carousel img download failed idx={idx}: {str(e)[:120]}")
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception:
+                        pass
 
         return files
 
@@ -313,6 +467,8 @@ class SocialMediaDownloader:
                 logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}: {clean_url}")
 
                 info = await self.extract_info(clean_url, attempt)
+                # conserva l'ultimo info estratto per debug
+                self._last_info = info
                 if not info:
                     if attempt < self.max_retries - 1:
                         delay = self.retry_delay * (2 ** attempt)
@@ -324,21 +480,23 @@ class SocialMediaDownloader:
                 uploader = info.get('uploader') or info.get('channel') or info.get('creator') or 'Sconosciuto'
                 title = info.get('title') or 'Contenuto'
 
-                # 1) Se è carosello/playlist -> prova a scaricare immagini
+                # 1) Se è carosello/playlist -> prova a scaricare immagini/video
                 if self._is_playlist_like(info):
-                    images = await self._download_carousel_images(info)
-                    if images:
+                    items = await self._download_carousel_items(info)
+                    if items:
                         return {
                             'success': True,
                             'type': 'carousel',
-                            'files': images,
+                            'files': items,
                             'title': title,
                             'uploader': uploader,
                             'platform': platform,
                             'url': clean_url
                         }
-                    # Se non riesce a scaricare immagini, prova comunque come video
-                    logger.info("Carosello rilevato ma nessuna immagine scaricata. Provo come video...")
+                    # Se non riesce a scaricare immagini/video, prova comunque come video
+                    logger.info("Carosello rilevato ma nessuna immagine/video scaricata. Provo come video...")
+                    if self.debug:
+                        self._save_debug_info('carousel_no_items')
 
                 # 2) Prova come video singolo
                 file_path = await self.download_with_ytdlp(clean_url, attempt)

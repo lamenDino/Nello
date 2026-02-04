@@ -19,7 +19,7 @@ from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.helpers import escape
-from telegram import InputMediaPhoto
+from telegram import InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -103,7 +103,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
 
-    dl = SocialMediaDownloader()
+    dl = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
 
     try:
         info = await dl.download_video(url)
@@ -167,15 +167,28 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f = open(photo_path, "rb")
                         opened.append((f, photo_path))
 
-                        # Caption solo sulla prima foto del primo chunk
-                        if chunk_index == 0 and i == 0:
-                            media.append(InputMediaPhoto(
-                                media=f,
-                                caption=caption,
-                                parse_mode=ParseMode.HTML
-                            ))
-                        else:
-                            media.append(InputMediaPhoto(media=f))
+                            # Caption solo sul primo media del primo chunk
+                            ext = os.path.splitext(photo_path)[1].lower()
+                            is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+
+                            if chunk_index == 0 and i == 0:
+                                if is_video:
+                                    media.append(InputMediaVideo(
+                                        media=f,
+                                        caption=caption,
+                                        parse_mode=ParseMode.HTML
+                                    ))
+                                else:
+                                    media.append(InputMediaPhoto(
+                                        media=f,
+                                        caption=caption,
+                                        parse_mode=ParseMode.HTML
+                                    ))
+                            else:
+                                if is_video:
+                                    media.append(InputMediaVideo(media=f))
+                                else:
+                                    media.append(InputMediaPhoto(media=f))
 
                     await context.bot.send_media_group(
                         chat_id=msg.chat_id,
