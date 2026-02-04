@@ -416,6 +416,66 @@ class SocialMediaDownloader:
 
         return files
 
+    async def _tiktok_photo_fallback(self, url: str) -> List[str]:
+        """
+        Fallback per pagine TikTok /photo/ che yt-dlp non riconosce.
+        Scarica la pagina HTML, estrae tutte le immagini (jpg/png/webp) e le salva.
+        """
+        files: List[str] = []
+        headers = {'User-Agent': self.get_random_user_agent()}
+
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            html = r.text
+        except Exception as e:
+            logger.warning(f"Failed fetching TikTok page for fallback: {e}")
+            return files
+
+        # Estrai url immagine con regex
+        import re
+        pattern = re.compile(r'https?://[^"\'>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?', re.IGNORECASE)
+        matches = pattern.findall(html)
+        uniq = []
+        for m in matches:
+            if m not in uniq:
+                uniq.append(m)
+
+        # Limita numero di immagini
+        MAX = 30
+        uniq = uniq[:MAX]
+
+        for idx, img_url in enumerate(uniq, start=1):
+            ext = os.path.splitext(img_url.split('?')[0])[1].lstrip('.').lower() or 'jpg'
+            if ext not in ('jpg', 'jpeg', 'png', 'webp'):
+                ext = 'jpg'
+
+            filename = os.path.join(self.temp_dir, f"tiktok_photo_{idx}.{ext}")
+            try:
+                rr = requests.get(img_url, headers=headers, stream=True, timeout=20)
+                rr.raise_for_status()
+                with open(filename, 'wb') as fh:
+                    for chunk in rr.iter_content(1024 * 256):
+                        if chunk:
+                            fh.write(chunk)
+                if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                    files.append(filename)
+                else:
+                    try:
+                        if os.path.exists(filename):
+                            os.remove(filename)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Failed download fallback image {img_url}: {e}")
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
+
+        return files
+
     async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
         """Download singolo (video) con yt-dlp"""
         try:
@@ -533,5 +593,22 @@ class SocialMediaDownloader:
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
+
+        # Dopo i tentativi normali, prova fallback specifici per piattaforme
+        if platform == 'tiktok':
+            try:
+                files = await self._tiktok_photo_fallback(clean_url)
+                if files:
+                    return {
+                        'success': True,
+                        'type': 'carousel',
+                        'files': files,
+                        'title': title,
+                        'uploader': uploader,
+                        'platform': platform,
+                        'url': clean_url
+                    }
+            except Exception as e:
+                logger.warning(f"TikTok fallback failed: {e}")
 
         return {'success': False, 'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'}

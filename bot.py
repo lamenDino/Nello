@@ -35,7 +35,7 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "8080"))
 
-GROUP_CHAT_ID = 214193849
+GROUP_CHAT_ID = int(os.getenv('CHAT_ID') or os.getenv('GROUP_CHAT_ID') or '214193849')
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -224,24 +224,39 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
     if not video_ranking:
         return
 
+    # Usa il chat_id del job se presente (così invia solo al gruppo configurato)
+    chat_id = getattr(getattr(context, 'job', None), 'chat_id', None) or GROUP_CHAT_ID
+
     sorted_users = sorted(
         video_ranking.items(),
         key=lambda x: x[1],
         reverse=True
-    )[:3]
+    )
 
     aforisma = random.choice(AFORISMI)
 
     text = "🏆 <b>RANKING SETTIMANALE</b>\n\n"
 
-    for i, (user_id, count) in enumerate(sorted_users):
-        badge = BADGES[i]
-        text += f"{badge} <a href='tg://user?id={user_id}'>Utente</a> — <b>{count}</b> video\n"
+    # Mostra sempre i primi 3 posti (se mancano, mostra segnaposto)
+    for i in range(3):
+        badge = BADGES[i] if i < len(BADGES) else '•'
+        if i < len(sorted_users):
+            user_id, count = sorted_users[i]
+            # Prova a risolvere il nome pubblico dell'utente
+            try:
+                chat = await context.bot.get_chat(user_id)
+                name = chat.full_name or getattr(chat, 'first_name', None) or 'Utente'
+            except Exception:
+                name = 'Utente'
 
-    text += f"\n📜 <i>{aforisma}</i>"
+            text += f"{badge} [{escape(name)}] — <b>{count}</b> video\n"
+        else:
+            text += f"{badge} [—] — <b>0</b> video\n"
+
+    text += f"\n📜 [{escape(aforisma)}]"
 
     await context.bot.send_message(
-        chat_id=GROUP_CHAT_ID,
+        chat_id=chat_id,
         text=text,
         parse_mode=ParseMode.HTML
     )
@@ -272,7 +287,10 @@ def start_webserver():
 # =========================
 
 def main():
-    threading.Thread(target=start_webserver, daemon=True).start()
+    # Webhook mode (useful on Render) controlled by USE_WEBHOOK and WEBHOOK_URL
+    USE_WEBHOOK = os.getenv('USE_WEBHOOK', '0') == '1'
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+    WEBHOOK_PATH = os.getenv('WEBHOOK_PATH', '/')
 
     application = Application.builder().token(TOKEN).build()
 
@@ -288,7 +306,24 @@ def main():
         chat_id=GROUP_CHAT_ID
     )
 
-    application.run_polling(drop_pending_updates=True)
+    if USE_WEBHOOK and WEBHOOK_URL:
+        # Run webhook server (python-telegram-bot will bind to PORT)
+        # WEBHOOK_PATH should be the path portion (e.g. '/webhook') or '/' for root
+        # Example: set USE_WEBHOOK=1 and WEBHOOK_URL=https://your-app.onrender.com/<path>
+        try:
+            application.run_webhook(
+                listen='0.0.0.0',
+                port=PORT,
+                webhook_url_path=WEBHOOK_PATH,
+                webhook_url=WEBHOOK_URL,
+                drop_pending_updates=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to start webhook mode: {e}")
+    else:
+        # Start a minimal health webserver for Render and run polling
+        threading.Thread(target=start_webserver, daemon=True).start()
+        application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
