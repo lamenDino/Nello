@@ -30,11 +30,25 @@ class SocialMediaDownloader:
     def __init__(self, debug: bool = False):
         self.temp_dir = tempfile.gettempdir()
 
-        # Percorsi cookies (opzionali)
-        self.instagram_cookies = os.path.join(os.path.dirname(__file__), 'cookies.txt')
-        self.youtube_cookies = os.path.join(os.path.dirname(__file__), 'youtube_cookies.txt')
-        self.tiktok_cookies = os.path.join(os.path.dirname(__file__), 'tiktok_cookies.txt')
-        self.facebook_cookies = os.path.join(os.path.dirname(__file__), 'facebook_cookies.txt')
+        # Funzione helper per risolvere i path dei cookie (Supporto Render Secret Files)
+        def resolve_cookie_path(filename):
+            # 1. Cerca nella directory corrente (priorità sviluppo locale)
+            local_path = os.path.join(os.path.dirname(__file__), filename)
+            if os.path.exists(local_path):
+                return local_path
+            
+            # 2. Cerca in /etc/secrets/ (standard Render Secret Files)
+            secret_path = os.path.join('/etc/secrets', filename)
+            if os.path.exists(secret_path):
+                return secret_path
+            
+            return local_path # Ritorna il percorso locale come default
+
+        # Percorsi cookies
+        self.instagram_cookies = resolve_cookie_path('cookies.txt')
+        self.youtube_cookies = resolve_cookie_path('youtube_cookies.txt')
+        self.tiktok_cookies = resolve_cookie_path('tiktok_cookies.txt')
+        self.facebook_cookies = resolve_cookie_path('facebook_cookies.txt')
 
         # Proxy opzionale (es. http://user:pass@host:port)
         self.proxy = (
