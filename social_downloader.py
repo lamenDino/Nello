@@ -515,15 +515,53 @@ class SocialMediaDownloader:
             
             resp = await loop.run_in_executor(None, _fetch)
             if resp.status_code != 200:
+                logger.warning(f"Facebook fallback: status code {resp.status_code} for {url}")
                 return None
                 
             text = resp.text
-            # Regex for og:image
-            m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', text)
-            if not m:
-                return None
             
-            img_url = html.unescape(m.group(1))
+            # Regex for og:image - try multiple patterns
+            # Spesso l'ordine degli attributi cambia o ci sono spazi diversi
+            img_url = None
+            patterns = [
+                r'<meta\s+property="og:image"\s+content="([^"]+)"',
+                r'<meta\s+content="([^"]+)"\s+property="og:image"',
+                r'<meta\s+name="og:image"\s+content="([^"]+)"',
+                r'<meta\s+name="twitter:image"\s+content="([^"]+)"',
+                r'"image":\s*"([^"]+)"',
+                r'"contentUrl":\s*"([^"]+)"'
+            ]
+            
+            for pat in patterns:
+                m = re.search(pat, text)
+                if m:
+                    img_url = html.unescape(m.group(1))
+                    break
+            
+            # Se ancora nullo, cerca URL diretti di immagini fbcdn ad alta qualità
+            if not img_url:
+                # Cerca URL che iniziano con http/https e finiscono con .jpg (anche con parametri dopo)
+                # Esclude escape json per ora, li gestiamo dopo
+                raw_matches = re.findall(r'(https?:\/\/[^"\s]+\.jpg[^"\s]*)', text.replace(r'\/', '/'))
+                for m in raw_matches:
+                    u = html.unescape(m)
+                    # Filtra avatar/thumbnails (spesso contengono s40x40, p50x50, ecc.)
+                    if 's40x40' in u or 's80x80' in u or 'p50x50' in u or 's200x200' in u:
+                        continue
+                    # Filtra emoji statiche
+                    if 'static.xx' in u or 'emoji' in u:
+                         continue
+                    # Se è un link fbcdn valido, prendilo
+                    if 'fbcdn.net' in u:
+                        img_url = u
+                        break
+
+            if not img_url:
+                logger.warning(f"Facebook fallback: no image found in page (len={len(text)})")
+                if len(text) < 500:
+                    logger.debug(f"Page content: {text}")
+                return None
+
             
             # Download image
             ts = datetime.utcnow().strftime('%Y%m%d%H%M%S')
