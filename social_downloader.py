@@ -20,6 +20,7 @@ import yt_dlp
 import requests
 import json
 import re
+import html
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class SocialMediaDownloader:
         self.instagram_cookies = os.path.join(os.path.dirname(__file__), 'cookies.txt')
         self.youtube_cookies = os.path.join(os.path.dirname(__file__), 'youtube_cookies.txt')
         self.tiktok_cookies = os.path.join(os.path.dirname(__file__), 'tiktok_cookies.txt')
+        self.facebook_cookies = os.path.join(os.path.dirname(__file__), 'facebook_cookies.txt')
 
         # Proxy opzionale (es. http://user:pass@host:port)
         self.proxy = (
@@ -51,13 +53,12 @@ class SocialMediaDownloader:
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1.2 Mobile/15E148 Safari/604.1',
         ]
 
         # Base options yt-dlp
         self.base_opts = {
             'format': 'best[ext=mp4]/best',
-            'outtmpl': os.path.join(self.temp_dir, '%(title)s_%(id)s.%(ext)s'),
+            'outtmpl': os.path.join(self.temp_dir, '%(title).150s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
             'socket_timeout': 30,
@@ -148,6 +149,8 @@ class SocialMediaDownloader:
 
         # Facebook headers
         if 'facebook' in url.lower() or 'fb.' in url.lower():
+            if os.path.exists(self.facebook_cookies):
+                opts['cookiefile'] = self.facebook_cookies
             opts['http_headers'].update({
                 'Referer': 'https://www.facebook.com/',
                 'Origin': 'https://www.facebook.com',
@@ -487,6 +490,65 @@ class SocialMediaDownloader:
                         pass
 
         return files
+
+    async def _facebook_fallback(self, url: str) -> Optional[List[str]]:
+        """Fallback for Facebook posts (images) using requests + regex"""
+        try:
+            headers = {
+                'User-Agent': self.get_random_user_agent(),
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': 'https://www.facebook.com/',
+                'Origin': 'https://www.facebook.com',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            # Load cookies if available
+            cookies = self._load_netscape_cookies(self.facebook_cookies) if hasattr(self, 'facebook_cookies') else None
+
+            loop = asyncio.get_event_loop()
+            
+            def _fetch():
+                return requests.get(url, headers=headers, cookies=cookies, timeout=15)
+            
+            resp = await loop.run_in_executor(None, _fetch)
+            if resp.status_code != 200:
+                return None
+                
+            text = resp.text
+            # Regex for og:image
+            m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', text)
+            if not m:
+                return None
+            
+            img_url = html.unescape(m.group(1))
+            
+            # Download image
+            ts = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+            tmp_name = os.path.join(self.temp_dir, f"fb_{ts}_fallback.jpg")
+            
+            def _dl_img():
+                r = requests.get(img_url, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    with open(tmp_name, 'wb') as f:
+                        f.write(r.content)
+                    return True
+                return False
+                
+            success = await loop.run_in_executor(None, _dl_img)
+            if success:
+                # Try to get title too
+                t_m = re.search(r'<title>(.*?)</title>', text)
+                if t_m:
+                    self.last_fallback_title = html.unescape(t_m.group(1))
+                return [tmp_name]
+            return None
+            
+        except Exception as e:
+            logger.error(f"Facebook fallback error: {e}")
+            return None
 
     async def _tiktok_photo_fallback(self, url: str) -> List[str]:
         """
@@ -1136,6 +1198,21 @@ class SocialMediaDownloader:
             except Exception as e:
                 err = str(e).lower()
                 logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
+
+                # Facebook Fallback for 404/Parse Error (posts)
+                if platform == 'facebook' and ('not found' in err or '404' in err or 'cannot parse' in err or 'parse' in err):
+                     logger.info("Facebook fallback triggered due to error.")
+                     fb_files = await self._facebook_fallback(clean_url)
+                     if fb_files:
+                         return {
+                            'success': True,
+                            'type': 'carousel',
+                            'files': fb_files,
+                            'title': self.last_fallback_title or title,
+                            'uploader': uploader,
+                            'platform': platform,
+                            'url': clean_url
+                        }
 
                 # Errori specifici
                 if 'sign in' in err or 'bot' in err:
