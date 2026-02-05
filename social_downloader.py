@@ -211,18 +211,25 @@ class SocialMediaDownloader:
         # YouTube: cookies + headers
         if 'youtube' in url.lower() or 'youtu.be' in url.lower():
             # Shorts detected via URL structure or duration
-            # Strict short requirement: ONLY shorts (<=120s)
-            opts['match_filters'] = ['duration<=120']
+            # Relaxed duration limit (match Telegram upload capability ~10 min / 50MB)
+            opts['match_filters'] = ['duration<=600']
             
-            # Use 'best' format which lets yt-dlp pick best available combined with ffmpeg merge
-            # 'best[ext=mp4]' is too restrictive for some shorts that are webm only
-            opts['format'] = 'bestvideo+bestaudio/best'
-            opts['merge_output_format'] = 'mp4'
-
+            # Use a more compatible format selection to avoid "Required format not available"
+            # Attempt to get MP4 video+audio, then just MP4, then whatever is available
+            opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            # opts['merge_output_format'] = 'mp4' # Disable forced merge to avoid errors if ffmpeg fails
+            
             # Use cookies on all attempts to avoid auth errors
+            # We must use the RESOLVED path (which might be a temp copy from secrets)
+            # Re-resolve it here just to be sure we get the usable path
             if os.path.exists(self.youtube_cookies):
-                opts['cookiefile'] = self.youtube_cookies
-                
+                 # Try to handle the read-only file system issue again just in case the init logic failed or wasn't called
+                 # But self.youtube_cookies should already be the correct path from __init__
+                 opts['cookiefile'] = self.youtube_cookies
+            elif attempt > 0:
+                 # If no cookies found, maybe that's why format is unavailable (age-gated?)
+                 logger.warning("YouTube cookies not found, some videos (Shorts/Agreed) might fail.")
+
             opts['http_headers'].update({
                 'Referer': 'https://www.youtube.com/',
                 'Origin': 'https://www.youtube.com',
