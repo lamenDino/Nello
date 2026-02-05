@@ -225,9 +225,36 @@ class SocialMediaDownloader:
             except Exception:
                 pass
 
-        # Rimuovi parametri
+        # Smart clean parameters (strip tracking, keep functional)
         if '?' in url:
-            url = url.split('?')[0]
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            
+            # List of params to remove
+            tracking_params = [
+                'fbclid', 'igsh', 'si', 'utm_source', 'utm_medium', 
+                'utm_campaign', 'utm_term', 'utm_content', 'share_id',
+                'mode', 'u_code', 'timestamp', 'user_id', 'sec_user_id',
+                'utm_id', 'gclid', '_ga'
+            ]
+            
+            # Keep only safe params
+            new_params = {}
+            for k, v in params.items():
+                if k.lower() not in tracking_params:
+                    new_params[k] = v
+                    
+            # Reconstruct
+            new_query = urlencode(new_params, doseq=True)
+            url = urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                new_query,
+                parsed.fragment
+            ))
 
         return url
 
