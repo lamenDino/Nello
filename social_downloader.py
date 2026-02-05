@@ -142,6 +142,11 @@ class SocialMediaDownloader:
             # Strict short requirement: ONLY shorts (<=120s)
             opts['match_filters'] = ['duration<=120']
             
+            # Use 'best' format which lets yt-dlp pick best avaialble combined with ffmpeg merge
+            # 'best[ext=mp4]' is too restrictive for some shorts that are webm only
+            opts['format'] = 'bestvideo+bestaudio/best'
+            opts['merge_output_format'] = 'mp4'
+
             # Use cookies on all attempts to avoid auth errors
             if os.path.exists(self.youtube_cookies):
                 opts['cookiefile'] = self.youtube_cookies
@@ -588,8 +593,27 @@ class SocialMediaDownloader:
             for pat in patterns:
                 m = re.search(pat, text)
                 if m:
-                    img_url = html.unescape(m.group(1))
+                    candidate = html.unescape(m.group(1))
+                    # Ignore common "ghost" or "placeholder" images
+                    if 'profile_pic' in candidate or 'static.xx' in candidate or 'blank.jpg' in candidate:
+                        continue
+                    if 's40x40' in candidate or 's50x50' in candidate: # Low res thumbnails
+                        continue
+                    img_url = candidate
                     break
+
+            # Handle /share/ redirects if requests didn't follow them completely (JS redirects)
+            if not img_url and 'share/' in url:
+                # Try to find the canonical URL in the HTML
+                # <link rel="canonical" href="...">
+                can_pat = re.search(r'<link\s+rel="canonical"\s+href="([^"]+)"', text)
+                if can_pat:
+                    real_url = html.unescape(can_pat.group(1))
+                    if real_url != url:
+                        logger.info(f"Facebook fallback: found canonical url {real_url}")
+                        # Recursive call with canonical URL might help if it's different
+                        # But be careful of infinite loops. Just try to use it for next steps or return self._facebook_fallback(real_url)
+                        pass
             
             # Se ancora nullo, cerca URL diretti di immagini fbcdn ad alta qualità
             if not img_url:
@@ -1363,11 +1387,33 @@ class SocialMediaDownloader:
                             delay = self.retry_delay * (2 ** attempt)
                             await asyncio.sleep(delay)
                         continue
+                    
+                    # For Facebook "Unsupported URL", we should try fallback too
+                    if platform == 'facebook':
+                        force_fallback = True
+                        break # Break retry loop to go to fallback section below
+
                     return {'success': False, 'error': '🔒 Contenuto privato o inaccessibile.'}
 
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
+
+        if 'facebook' in platform:
+             try:
+                 fb_files = await self._facebook_fallback(clean_url)
+                 if fb_files:
+                     return {
+                         'success': True,
+                         'type': 'carousel',
+                         'files': fb_files,
+                         'title': title,
+                         'uploader': uploader,
+                         'platform': platform,
+                         'url': clean_url
+                     }
+             except Exception as e:
+                 logger.warning(f"Facebook fallback failed: {e}")
 
         # Dopo i tentativi normali, prova fallback specifici per piattaforme
         if platform == 'tiktok':
