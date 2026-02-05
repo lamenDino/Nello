@@ -138,10 +138,14 @@ class SocialMediaDownloader:
 
         # YouTube: cookies + headers
         if 'youtube' in url.lower() or 'youtu.be' in url.lower():
-            # Shorts spesso <= 60
-            opts['match_filters'] = ['duration<=60']
-            if attempt == 0 and os.path.exists(self.youtube_cookies):
+            # Shorts detected via URL structure or duration
+            # Strict short requirement: ONLY shorts (<=120s)
+            opts['match_filters'] = ['duration<=120']
+            
+            # Use cookies on all attempts to avoid auth errors
+            if os.path.exists(self.youtube_cookies):
                 opts['cookiefile'] = self.youtube_cookies
+                
             opts['http_headers'].update({
                 'Referer': 'https://www.youtube.com/',
                 'Origin': 'https://www.youtube.com',
@@ -519,6 +523,28 @@ class SocialMediaDownloader:
                 return None
                 
             text = resp.text
+
+            # --- DETECT VIDEO ---
+            # Se il link è esplicitamente un video (controllato dalla presenza di video indicators nel meta), 
+            # e siamo qui (fallback immagini), significa che yt-dlp ha fallito. 
+            # L'utente non vuole la foto se è un video.
+            video_indicators = [
+                r'<meta\s+property="og:type"\s+content="video',
+                r'<meta\s+property="og:video"',
+                r'<meta\s+name="twitter:player"',
+                r'"__typename":"Video"',
+                r'"is_video":true'
+            ]
+            is_video_page = False
+            for vi in video_indicators:
+                if re.search(vi, text, re.IGNORECASE):
+                    is_video_page = True
+                    break
+            
+            # Se sembra un video, controlla se l'URL non era esplicitamente una foto
+            if is_video_page and '/photo' not in url:
+                logger.info("Facebook fallback: detected VIDEO content. Aborting image fallback.")
+                return None
             
             # Regex for og:image - try multiple patterns
             # Spesso l'ordine degli attributi cambia o ci sono spazi diversi
@@ -1142,6 +1168,43 @@ class SocialMediaDownloader:
             logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
             return None
 
+    async def get_random_video_url(self, user_url: str) -> Optional[str]:
+        """Recupera un URL video casuale da un profilo (TikTok/Instagram/etc)"""
+        import random
+        try:
+            opts = self.get_ydl_opts(user_url)
+            opts.update({
+                'extract_flat': True,
+                'playlistend': 20, # Fetch latest 20
+                'quiet': True,
+            })
+            
+            loop = asyncio.get_event_loop()
+            def _extract():
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(user_url, download=False)
+            
+            info = await loop.run_in_executor(None, _extract)
+            if not info: 
+                return None
+            
+            entries = info.get('entries')
+            if not entries:
+                return None
+                
+            # entries might be a generator or list
+            valid_urls = []
+            for e in entries:
+                if e.get('url'):
+                    valid_urls.append(e['url'])
+            
+            if valid_urls:
+                return random.choice(valid_urls)
+            return None
+        except Exception as e:
+            logger.warning(f"Failed getting random video from {user_url}: {e}")
+            return None
+
     # --------------------------
     # Public API
     # --------------------------
@@ -1239,24 +1302,31 @@ class SocialMediaDownloader:
 
                 # Facebook Fallback for 404/Parse Error (posts)
                 if platform == 'facebook' and ('not found' in err or '404' in err or 'cannot parse' in err or 'parse' in err):
-                     logger.info("Facebook fallback triggered due to error.")
-                     fb_files = await self._facebook_fallback(clean_url)
-                     if fb_files:
-                         return {
-                            'success': True,
-                            'type': 'carousel',
-                            'files': fb_files,
-                            'title': self.last_fallback_title or title,
-                            'uploader': uploader,
-                            'platform': platform,
-                            'url': clean_url
-                        }
+                     # Avoid fallback if URL is clearly a video
+                     is_clear_video = any(x in clean_url for x in ['/videos/', '/watch', '/reel/'])
+                     if is_clear_video:
+                         logger.info("Facebook download failed for video URL. Skipping image fallback.")
+                     else:
+                         logger.info("Facebook fallback triggered due to error.")
+                         fb_files = await self._facebook_fallback(clean_url)
+                         if fb_files:
+                             return {
+                                'success': True,
+                                'type': 'carousel',
+                                'files': fb_files,
+                                'title': self.last_fallback_title or title,
+                                'uploader': uploader,
+                                'platform': platform,
+                                'url': clean_url
+                            }
 
                 # Errori specifici
                 if 'sign in' in err or 'bot' in err:
                     return {'success': False, 'error': '🤖 YouTube chiede autenticazione (bot detection). Riprova tra poco.'}
                 if 'cannot parse' in err or 'parse' in err:
                     return {'success': False, 'error': '⚠️ Facebook ha cambiato struttura. Riprova con un altro reel.'}
+                if 'does not pass match_filter' in err:
+                    return {'success': False, 'error': '⚠️ Questo video è troppo lungo. Scarico solo YouTube Shorts (max 120s).'}
                 if 'no video formats found' in err or 'unsupported url' in err:
                     # Forza fallback foto per Instagram/TikTok quando non trova video o URL non supportato
                     if platform in ['instagram', 'tiktok']:

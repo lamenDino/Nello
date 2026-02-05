@@ -12,7 +12,8 @@ import logging
 import threading
 import asyncio
 import random
-from datetime import time
+import pytz
+from datetime import time, datetime
 from collections import defaultdict
 
 from aiohttp import web
@@ -60,6 +61,28 @@ AFORISMI = [
     "La disciplina oggi è la libertà di domani."
 ]
 
+FUNNY_SOURCES = [
+    "https://www.tiktok.com/@khaby.lame",
+    "https://www.tiktok.com/@zachking",
+    "https://www.tiktok.com/@youneszarou",
+    "https://www.tiktok.com/@ox_zung",
+    "https://www.tiktok.com/@homm9k",
+    "https://www.tiktok.com/@jasonderulo",
+    "https://www.tiktok.com/@failarmy"
+]
+
+NELLO_ERRORS = [
+    "🐶 <b>Nello ci ha provato, ma le sue anche hanno fatto cilecca!</b>",
+    "🦴 <b>Nello si è distratto a leccarsi una zampa e ha perso il link (ha 11 anni, capiscilo).</b>",
+    "🐾 <b>Nello dice che è troppo vecchio per correre dietro a questo video!</b>",
+    "🦿 <b>Le gambe di Nello cigolano oggi... Impossibile scaricare.</b>",
+    "💊 <b>Nello deve prendere le medicine per i reni, torna dopo!</b>",
+    "🐕 <b>Nello è andato dal veterinario, il download deve aspettare.</b>",
+    "🚑 <b>Nello è inciampato mentre portava il file... colpa dell'artrosi!</b>",
+    "😴 <b>Nello si è addormentato sulla tastiera. Vecchiaia portami via...</b>",
+    "🛁 <b>Nello sta facendo i fanghi per i dolori, riprova dopo!</b>"
+]
+
 # =========================
 # UTILS
 # =========================
@@ -78,7 +101,9 @@ def detect_platform(url: str) -> str:
         return "Instagram"
     if "facebook" in url:
         return "Facebook"
-    if "youtube" in url:
+    if "youtube" in url or "youtu.be" in url:
+        if "/shorts/" in url:
+             return "YouTube Shorts"
         return "YouTube"
     if "twitter" in url or "x.com" in url:
         return "Twitter / X"
@@ -113,12 +138,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ❌ fallimento → informa l'utente e silenzio totale
         if not info or not info.get("success"):
+            nello_joke = random.choice(NELLO_ERRORS)
+            specific_error = info.get('error', 'Errore sconosciuto')
+            
             try:
                 await context.bot.send_message(
                     chat_id=msg.chat_id,
-                    text=("❌ Non sono riuscito a scaricare il contenuto. "
-                          "Potrebbe essere privato, richiedere autenticazione (cookies) o essere bloccato per IP. "
-                          "Se è un TikTok prova ad aggiungere cookies aggiornati in `tiktok_cookies.txt` o usa una VPN."),
+                    text=f"{nello_joke}\n\n⚠️ <i>{escape(specific_error)}</i>",
                     parse_mode=ParseMode.HTML
                 )
             except Exception:
@@ -134,11 +160,22 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # incrementa ranking (1 contenuto = 1 punto, sia video che carosello)
         video_ranking[msg.from_user.id] += 1
 
+        # Truncate title to 3 lines max
+        raw_title = info.get('title', 'N/A')
+        if raw_title:
+             # Split lines, take first 3
+             lines = raw_title.split('\n')
+             if len(lines) > 3:
+                 raw_title = '\n'.join(lines[:3]) + "..."
+             # Also strict char limit just in case
+             if len(raw_title) > 300:
+                 raw_title = raw_title[:300] + "..."
+
         caption = (
             f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
             f"👤 <b>Video inviato da :</b> {escape(msg.from_user.full_name)}\n"
             f"🔗 <b>Link originale :</b> {escape(url)}\n"
-            f"📝 <b>Meta info video :</b> {escape(info.get('title', 'N/A'))}"
+            f"📝 <b>Meta info video :</b> {escape(raw_title)}"
         )
 
         # =========================
@@ -304,6 +341,68 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # =========================
+# HOURLY FUNNY VIDEO JOB
+# =========================
+
+async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
+    # Timezone check (Europe/Rome)
+    try:
+        tz = pytz.timezone('Europe/Rome')
+        now = datetime.now(tz)
+    except Exception:
+        now = datetime.now()
+
+    # Exclude 00:00 to 09:00 (active from 09:00 to 23:59)
+    if now.hour < 9:
+        return
+
+    chat_id = GROUP_CHAT_ID
+    source = random.choice(FUNNY_SOURCES)
+    dl = SocialMediaDownloader()
+    
+    try:
+        # Get random video url
+        video_url = await dl.get_random_video_url(source)
+        if not video_url:
+            return 
+            
+        # Download
+        info = await dl.download_video(video_url)
+        
+        if info.get("success") and info.get("type") == "video":
+             # Send video + poll
+             caption = (
+                 f"🤣 <b>Video Divertente dell'Ora!</b>\n"
+                 f"👤 <b>Fonte:</b> <a href='{source}'>TikTok</a>\n"
+                 f"🔗 <a href='{video_url}'>Video Originale</a>\n\n"
+                 f"Cosa ne pensate?"
+             )
+             
+             with open(info['file_path'], 'rb') as f:
+                 msg = await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=f,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                 )
+             
+             try:
+                 os.remove(info['file_path'])
+             except:
+                 pass
+                 
+             # Send Poll
+             await context.bot.send_poll(
+                chat_id=chat_id,
+                question="Voto per questo video?",
+                options=["😂😂😂", "🙂 Carino", "😐 Meh", "🤮 Orribile"],
+                reply_to_message_id=msg.message_id
+             )
+             
+    except Exception as e:
+        logger.error(f"Hourly video job failed: {e}")
+
+# =========================
 # WEEKLY RANKING JOB
 # =========================
 
@@ -400,6 +499,13 @@ def main():
         weekly_ranking,
         time=time(hour=20, minute=0),
         days=(6,),
+        chat_id=GROUP_CHAT_ID
+    )
+
+    application.job_queue.run_repeating(
+        hourly_funny_routine,
+        interval=3600,
+        first=60,
         chat_id=GROUP_CHAT_ID
     )
 
