@@ -30,7 +30,17 @@ class TikTokDownloader:
             except Exception as e:
                 logger.error(f"Errore creazione cookie temp: {e}")
         elif os.path.exists(secret_file):
-            cookie_file = secret_file
+            # Se è un secret file, copialo in temp perché /etc/secrets è read-only
+            try:
+                temp_secret_cookie = os.path.join(self.temp_dir, 'secret_tiktok_cookies.txt')
+                with open(secret_file, 'rb') as f_src:
+                    content = f_src.read()
+                with open(temp_secret_cookie, 'wb') as f_dst:
+                    f_dst.write(content)
+                cookie_file = temp_secret_cookie
+            except Exception as e:
+                logger.error(f"Errore copia secret cookie: {e}")
+                cookie_file = secret_file
 
         self.ydl_opts = {
             'format': 'best[ext=mp4]/best',

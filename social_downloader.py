@@ -51,25 +51,46 @@ class SocialMediaDownloader:
                             logger.error(f"Errore scrittura cookie da env {env_var}: {e}")
 
             # 2. Cerca in /etc/secrets/ (standard Render Secret Files)
+            found_secret_path = None
+            
             # 2a. Cerca con il filename originale (es. cookies.txt)
-            secret_path = os.path.join('/etc/secrets', filename)
-            if os.path.exists(secret_path):
-                logger.info(f"Cookie trovato in secrets: {secret_path}")
-                return secret_path
+            path_orig = os.path.join('/etc/secrets', filename)
+            if os.path.exists(path_orig):
+                found_secret_path = path_orig
 
-            # 2b. Cerca con i nomi delle variabili (es. INSTAGRAM_COOKIES)
-            # Utile se l'utente ha nominato il Secret File come la variabile
-            if env_var_names:
+            # 2b. Cerca con i nomi delle variabili (es. INSTAGRAM_COOKIES) se non trovato prima
+            if not found_secret_path and env_var_names:
                 if isinstance(env_var_names, str):
                     check_names = [env_var_names]
                 else:
                     check_names = env_var_names
                 
                 for name in check_names:
-                    secret_path_env = os.path.join('/etc/secrets', name)
-                    if os.path.exists(secret_path_env):
-                        logger.info(f"Cookie trovato in secrets (alias {name}): {secret_path_env}")
-                        return secret_path_env
+                    path_alias = os.path.join('/etc/secrets', name)
+                    if os.path.exists(path_alias):
+                        found_secret_path = path_alias
+                        break
+            
+            # Se abbiamo trovato un secret, lo copiamo in TEMP perché /etc/secrets è Read-Only
+            if found_secret_path:
+                try:
+                    logger.info(f"Cookie trovato in secrets: {found_secret_path}")
+                    # Creiamo un nome file sicuro per la temp dir
+                    safe_name = f"copy_{os.path.basename(found_secret_path)}_{filename}"
+                    temp_copy_path = os.path.join(self.temp_dir, safe_name)
+                    
+                    # Copia contenuto
+                    with open(found_secret_path, 'rb') as f_src:
+                        content = f_src.read()
+                    with open(temp_copy_path, 'wb') as f_dst:
+                        f_dst.write(content)
+                        
+                    logger.info(f"Copiato cookie secret in scrivibile: {temp_copy_path}")
+                    return temp_copy_path
+                except Exception as e:
+                    logger.error(f"Errore durante la copia del secret file {found_secret_path}: {e}")
+                    # Se fallisce la copia, ritorniamo l'originale sperando che yt-dlp non debba scriverci
+                    return found_secret_path
 
             # 3. Cerca nella directory corrente (Fallback locale / git)
             local_path = os.path.join(os.path.dirname(__file__), filename)
