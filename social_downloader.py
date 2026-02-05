@@ -1401,14 +1401,14 @@ class SocialMediaDownloader:
 
                 # Facebook Fallback for 404/Parse Error (posts)
                 if platform == 'facebook' and ('not found' in err or '404' in err or 'cannot parse' in err or 'parse' in err):
-                     # Try fallback even for videos (might find raw mp4 or cover image)
-                     logger.info("Facebook fallback triggered due to error.")
-                     fb_files = await self._facebook_fallback(clean_url)
-                     if fb_files:
-                         # Check extensions to determine type
-                         is_video_result = any(f.endswith('.mp4') for f in fb_files)
-                         
-                         result_data = {
+                    # Try fallback even for videos (might find raw mp4 or cover image)
+                    logger.info("Facebook fallback triggered due to error.")
+                    fb_files = await self._facebook_fallback(clean_url)
+                    if fb_files:
+                        # Check extensions to determine type
+                        is_video_result = any(f.endswith('.mp4') for f in fb_files)
+                        
+                        result_data = {
                             'success': True,
                             'files': fb_files,
                             'title': self.last_fallback_title or title,
@@ -1416,7 +1416,7 @@ class SocialMediaDownloader:
                             'platform': platform,
                             'url': clean_url
                         }
-                        
+
                         if is_video_result and len(fb_files) == 1:
                             result_data['type'] = 'video'
                             result_data['file_path'] = fb_files[0]
