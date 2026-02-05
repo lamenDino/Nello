@@ -11,6 +11,27 @@ logger = logging.getLogger(__name__)
 class TikTokDownloader:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
+        
+        # Gestione cookie TikTok da env o file
+        cookie_file = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+        
+        # 1. Controlla Env Vars
+        env_cookies = os.getenv('TIKTOK_COOKIES') or os.getenv('COOKIES_TXT')
+        
+        # 2. Controlla Secret Files (Render)
+        secret_file = os.path.join('/etc/secrets', 'TIKTOK_COOKIES')
+        
+        if env_cookies and len(env_cookies) > 10:
+            try:
+                temp_cookie = os.path.join(self.temp_dir, 'env_tiktok_cookies.txt')
+                with open(temp_cookie, 'w', encoding='utf-8') as f:
+                    f.write(env_cookies)
+                cookie_file = temp_cookie
+            except Exception as e:
+                logger.error(f"Errore creazione cookie temp: {e}")
+        elif os.path.exists(secret_file):
+            cookie_file = secret_file
+
         self.ydl_opts = {
             'format': 'best[ext=mp4]/best',
             'outtmpl': os.path.join(self.temp_dir, '%(title)s_%(id)s.%(ext)s'),
@@ -18,7 +39,7 @@ class TikTokDownloader:
             'no_warnings': True,
             'extractaudio': False,
             'max_filesize': 50 * 1024 * 1024,
-            'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt')
+            'cookiefile': cookie_file
         }
 
     async def download_video(self, url: str) -> Dict:

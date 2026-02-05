@@ -30,25 +30,62 @@ class SocialMediaDownloader:
     def __init__(self, debug: bool = False):
         self.temp_dir = tempfile.gettempdir()
 
-        # Funzione helper per risolvere i path dei cookie (Supporto Render Secret Files)
-        def resolve_cookie_path(filename):
-            # 1. Cerca nella directory corrente (priorità sviluppo locale)
-            local_path = os.path.join(os.path.dirname(__file__), filename)
-            if os.path.exists(local_path):
-                return local_path
-            
+        # Funzione helper per risolvere i path dei cookie (Supporto Render Secret Files & Env Vars)
+        def resolve_cookie_path(filename, env_var_names=None):
+            # 1. Cerca nelle variabili d'ambiente (PRIORITÀ ALTA per Render)
+            if env_var_names:
+                if isinstance(env_var_names, str):
+                    env_var_names = [env_var_names]
+                
+                for env_var in env_var_names:
+                    content = os.getenv(env_var)
+                    if content and len(content.strip()) > 10: # Check minimo validità
+                        try:
+                            # Crea un file temporaneo con il contenuto
+                            temp_cookie_path = os.path.join(self.temp_dir, f"env_{filename}")
+                            with open(temp_cookie_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                            logger.info(f"Cookie creato da variabile d'ambiente {env_var}: {temp_cookie_path}")
+                            return temp_cookie_path
+                        except Exception as e:
+                            logger.error(f"Errore scrittura cookie da env {env_var}: {e}")
+
             # 2. Cerca in /etc/secrets/ (standard Render Secret Files)
+            # 2a. Cerca con il filename originale (es. cookies.txt)
             secret_path = os.path.join('/etc/secrets', filename)
             if os.path.exists(secret_path):
+                logger.info(f"Cookie trovato in secrets: {secret_path}")
                 return secret_path
+
+            # 2b. Cerca con i nomi delle variabili (es. INSTAGRAM_COOKIES)
+            # Utile se l'utente ha nominato il Secret File come la variabile
+            if env_var_names:
+                if isinstance(env_var_names, str):
+                    check_names = [env_var_names]
+                else:
+                    check_names = env_var_names
+                
+                for name in check_names:
+                    secret_path_env = os.path.join('/etc/secrets', name)
+                    if os.path.exists(secret_path_env):
+                        logger.info(f"Cookie trovato in secrets (alias {name}): {secret_path_env}")
+                        return secret_path_env
+
+            # 3. Cerca nella directory corrente (Fallback locale / git)
+            local_path = os.path.join(os.path.dirname(__file__), filename)
+            # Se esiste torniamo questo, ma logghiamo che è un fallback
+            if os.path.exists(local_path):
+                logger.info(f"Uso cookie locale (fallback): {local_path}")
+                return local_path
             
-            return local_path # Ritorna il percorso locale come default
+            logger.warning(f"Cookie {filename} non trovato da nessuna parte.")
+            return local_path # Ritorna il percorso locale come default per evitare crash immediati su path null
 
         # Percorsi cookies
-        self.instagram_cookies = resolve_cookie_path('cookies.txt')
-        self.youtube_cookies = resolve_cookie_path('youtube_cookies.txt')
-        self.tiktok_cookies = resolve_cookie_path('tiktok_cookies.txt')
-        self.facebook_cookies = resolve_cookie_path('facebook_cookies.txt')
+        self.instagram_cookies = resolve_cookie_path('cookies.txt', ['INSTAGRAM_COOKIES', 'COOKIES_TXT'])
+        self.youtube_cookies = resolve_cookie_path('youtube_cookies.txt', 'YOUTUBE_COOKIES')
+        self.tiktok_cookies = resolve_cookie_path('tiktok_cookies.txt', 'TIKTOK_COOKIES')
+        self.facebook_cookies = resolve_cookie_path('facebook_cookies.txt', 'FACEBOOK_COOKIES')
 
         # Proxy opzionale (es. http://user:pass@host:port)
         self.proxy = (
