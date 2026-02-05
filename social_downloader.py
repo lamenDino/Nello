@@ -575,7 +575,44 @@ class SocialMediaDownloader:
             
             # Se sembra un video, controlla se l'URL non era esplicitamente una foto
             if is_video_page and '/photo' not in url:
-                logger.info("Facebook fallback: detected VIDEO content. Aborting image fallback.")
+                # Tenta un ultimo fallback brutale: cerca .mp4 nel sorgente
+                # A volte fb restituisce il link .mp4 in chiaro anche se yt-dlp non riesce a parsare
+                logger.info("Facebook fallback: detected VIDEO page. Searching for raw .mp4 link...")
+                mp4_matches = re.findall(r'"(https?:\/\/[^"]+\.mp4[^"]*)"', text.replace(r'\/', '/'))
+                if mp4_matches:
+                    best_mp4 = mp4_matches[0]
+                    # Filtra mp4
+                    for m in mp4_matches:
+                         if 'sd_src' in m or 'hd_src' in m:
+                            best_mp4 = m
+                            break
+                    
+                    logger.info(f"Facebook fallback: FOUND raw mp4. Downloading...")
+                    mp4_url = html.unescape(best_mp4)
+                    ts = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+                    tmp_mp4 = os.path.join(self.temp_dir, f"fb_{ts}_fallback.mp4")
+                    
+                    def _dl_mp4():
+                        try:
+                            r = requests.get(mp4_url, headers=headers, stream=True, timeout=60)
+                            if r.status_code == 200:
+                                with open(tmp_mp4, 'wb') as f:
+                                    for chunk in r.iter_content(chunk_size=1024*1024):
+                                        if chunk:
+                                            f.write(chunk)
+                                return True
+                        except Exception:
+                            return False
+                        return False
+                    
+                    try:
+                        mp4_success = await loop.run_in_executor(None, _dl_mp4)
+                        if mp4_success and os.path.exists(tmp_mp4) and os.path.getsize(tmp_mp4) > 1000:
+                             return [tmp_mp4]
+                    except Exception as e:
+                        logger.warning(f"Facebook fallback MP4 download failed: {e}")
+                    # Let's abort image fallback for video.
+                logger.info("Facebook fallback: detected VIDEO content and no raw mp4 found. Aborting.")
                 return None
             
             # Regex for og:image - try multiple patterns
@@ -594,11 +631,18 @@ class SocialMediaDownloader:
                 m = re.search(pat, text)
                 if m:
                     candidate = html.unescape(m.group(1))
+                    candidate_lower = candidate.lower()
                     # Ignore common "ghost" or "placeholder" images
-                    if 'profile_pic' in candidate or 'static.xx' in candidate or 'blank.jpg' in candidate:
+                    if 'profile_pic' in candidate_lower or 'static.xx' in candidate_lower or 'blank.jpg' in candidate_lower:
                         continue
-                    if 's40x40' in candidate or 's50x50' in candidate: # Low res thumbnails
+                    if 's40x40' in candidate_lower or 's50x50' in candidate_lower: # Low res thumbnails
                         continue
+                    if 'generic' in candidate_lower or 'ad_image' in candidate_lower:
+                        continue
+                    # Filtra immagini grigie di default
+                    if 'gray_profile' in candidate_lower or 'silhouette' in candidate_lower:
+                        continue
+                        
                     img_url = candidate
                     break
 
@@ -622,13 +666,21 @@ class SocialMediaDownloader:
                 raw_matches = re.findall(r'(https?:\/\/[^"\s]+\.jpg[^"\s]*)', text.replace(r'\/', '/'))
                 for m in raw_matches:
                     u = html.unescape(m)
-                    # Filtra avatar/thumbnails (spesso contengono s40x40, p50x50, ecc.)
-                    if 's40x40' in u or 's80x80' in u or 'p50x50' in u or 's200x200' in u:
+                    u_lower = u.lower()
+                    # Filtri rigorosi per immagini spazzatura
+                    bad_terms = [
+                         's40x40', 'p50x50', 's80x80', 's200x200', 'width=40', 
+                         'static.xx', 'emoji', 'profile_pic', 'blank', 
+                         'rsrc.php', 'assets', 'sprite', 'icon',
+                         'gray_profile', 'silhouette' # Also here
+                    ]
+                    if any(bt in u_lower for bt in bad_terms):
                         continue
-                    # Filtra emoji statiche
-                    if 'static.xx' in u or 'emoji' in u:
-                         continue
+                    
                     # Se è un link fbcdn valido, prendilo
+                    if 'fbcdn.net' in u or 'facebook.com' in u:
+                        img_url = u
+                        break
                     if 'fbcdn.net' in u:
                         img_url = u
                         break
@@ -1036,8 +1088,6 @@ class SocialMediaDownloader:
             logger.info(f"Instagram Fallback: status {r.status_code}, len {len(r.text)}")
             r.raise_for_status()
             html = r.text
-            with open("insta_dump_new.html", "w", encoding="utf-8") as f:
-                f.write(html)
         except Exception as e:
             logger.warning(f"Failed fetching Instagram page for fallback: {e}")
             return files
@@ -1153,6 +1203,15 @@ class SocialMediaDownloader:
 
         urls: List[str] = []
 
+        # 0) Always extract Meta og:image / twitter:image FIRST (Most reliable for single posts)
+        meta_patterns = [
+            re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+            re.compile(r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+            re.compile(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+        ]
+        for mp in meta_patterns:
+            urls.extend(mp.findall(html))
+
         # 1) window._sharedData
         shared_match = re.search(r'window\._sharedData\s*=\s*(\{.*?\})\s*;\s*</script>', html, re.DOTALL)
         if shared_match:
@@ -1163,28 +1222,17 @@ class SocialMediaDownloader:
                 pass
 
         # 2) __additionalDataLoaded
-        if not urls:
-            add_match = re.search(r'__additionalDataLoaded\([^,]+,\s*(\{.*?\})\s*\);', html, re.DOTALL)
-            if add_match:
-                try:
-                    data = json.loads(add_match.group(1))
-                    _collect_urls(data, urls)
-                except Exception:
-                    pass
+        add_match = re.search(r'__additionalDataLoaded\([^,]+,\s*(\{.*?\})\s*\);', html, re.DOTALL)
+        if add_match:
+            try:
+                data = json.loads(add_match.group(1))
+                _collect_urls(data, urls)
+            except Exception:
+                pass
 
-        # 3) Regex generico se ancora vuoto
-        if not urls:
-            pattern = re.compile(r'https?://[^"\'>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?', re.IGNORECASE)
-            urls.extend([u for u in pattern.findall(html) if 'cdninstagram' in u or 'fbcdn' in u])
-
-        # 4) Meta og:image
-        if not urls:
-            meta_patterns = [
-                re.compile(r'<meta[^>]+property=["\"]og:image["\"][^>]+content=["\"]([^"\"]+)', re.IGNORECASE),
-                re.compile(r'<meta[^>]+name=["\"]og:image["\"][^>]+content=["\"]([^"\"]+)', re.IGNORECASE),
-            ]
-            for mp in meta_patterns:
-                urls.extend(mp.findall(html))
+        # 3) Regex generico
+        pattern = re.compile(r'https?://[^"\'>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?', re.IGNORECASE)
+        urls.extend([u for u in pattern.findall(html) if 'cdninstagram' in u or 'fbcdn' in u])
 
         return _dedupe(urls)
 
@@ -1353,23 +1401,29 @@ class SocialMediaDownloader:
 
                 # Facebook Fallback for 404/Parse Error (posts)
                 if platform == 'facebook' and ('not found' in err or '404' in err or 'cannot parse' in err or 'parse' in err):
-                     # Avoid fallback if URL is clearly a video
-                     is_clear_video = any(x in clean_url for x in ['/videos/', '/watch', '/reel/'])
-                     if is_clear_video:
-                         logger.info("Facebook download failed for video URL. Skipping image fallback.")
-                     else:
-                         logger.info("Facebook fallback triggered due to error.")
-                         fb_files = await self._facebook_fallback(clean_url)
-                         if fb_files:
-                             return {
-                                'success': True,
-                                'type': 'carousel',
-                                'files': fb_files,
-                                'title': self.last_fallback_title or title,
-                                'uploader': uploader,
-                                'platform': platform,
-                                'url': clean_url
-                            }
+                     # Try fallback even for videos (might find raw mp4 or cover image)
+                     logger.info("Facebook fallback triggered due to error.")
+                     fb_files = await self._facebook_fallback(clean_url)
+                     if fb_files:
+                         # Check extensions to determine type
+                         is_video_result = any(f.endswith('.mp4') for f in fb_files)
+                         
+                         result_data = {
+                            'success': True,
+                            'files': fb_files,
+                            'title': self.last_fallback_title or title,
+                            'uploader': uploader,
+                            'platform': platform,
+                            'url': clean_url
+                        }
+                        
+                        if is_video_result and len(fb_files) == 1:
+                            result_data['type'] = 'video'
+                            result_data['file_path'] = fb_files[0]
+                        else:
+                            result_data['type'] = 'carousel'
+                            
+                        return result_data
 
                 # Errori specifici
                 if 'sign in' in err or 'bot' in err:
@@ -1466,17 +1520,25 @@ class SocialMediaDownloader:
                 else:
                    res_files = fallback_resp
                    res_desc = ""
-
+                
+                # Double check filtering if fallback result contained static assets again
+                # (Ideally _instagram_photo_fallback should have done it, but double safety)
                 if res_files:
-                    return {
-                        'success': True,
-                        'type': 'carousel',
-                        'files': res_files,
-                        'title': res_desc if res_desc else title,
-                        'uploader': uploader,
-                        'platform': platform,
-                        'url': clean_url
-                    }
+                    safe_files = []
+                    for f in res_files:
+                        if 'static.cdninstagram' not in f and 'rsrc.php' not in f:
+                            safe_files.append(f)
+                    
+                    if safe_files:
+                        return {
+                            'success': True,
+                            'type': 'carousel',
+                            'files': safe_files,
+                            'title': res_desc if res_desc else title,
+                            'uploader': uploader,
+                            'platform': platform,
+                            'url': clean_url
+                        }
             except Exception as e:
                 logger.warning(f"Instagram fallback failed: {e}")
 
