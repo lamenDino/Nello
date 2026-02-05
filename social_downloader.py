@@ -142,7 +142,7 @@ class SocialMediaDownloader:
             # Strict short requirement: ONLY shorts (<=120s)
             opts['match_filters'] = ['duration<=120']
             
-            # Use 'best' format which lets yt-dlp pick best avaialble combined with ffmpeg merge
+            # Use 'best' format which lets yt-dlp pick best available combined with ffmpeg merge
             # 'best[ext=mp4]' is too restrictive for some shorts that are webm only
             opts['format'] = 'bestvideo+bestaudio/best'
             opts['merge_output_format'] = 'mp4'
