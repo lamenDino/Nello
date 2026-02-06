@@ -18,6 +18,7 @@ from typing import Dict, Optional, List, Tuple
 import http.cookiejar
 
 import yt_dlp
+from yt_dlp.version import __version__ as yt_version
 import requests
 import json
 import re
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 class SocialMediaDownloader:
     def __init__(self, debug: bool = False):
+        logger.info(f"Yt-dlp version: {yt_version}")
         self.temp_dir = tempfile.gettempdir()
 
         # Funzione helper per risolvere i path dei cookie (Supporto Render Secret Files & Env Vars)
@@ -1425,12 +1427,19 @@ class SocialMediaDownloader:
             "https://cobalt.zuu.pl",
             "https://cobalt.7th.ch",
             "https://cobalt.q11.app",
-            "https://co.wuk.sh", 
-            "https://cobalt.tools", # Tentativo finale (ufficiale)
-            # Backup instances (often flaky)
+            "https://co.wuk.sh",
+            "https://cobalt.tools",
             "https://cobalt.arms.tezcatlipoca.org",
             "https://cobalt.xy24.eu",
             "https://dl.khub.ky",
+            "https://api.cobalt.land",
+            "https://cobalt.moscow.btn.am",
+            "https://cobalt.orj.cc",
+            "https://cobalt.zhilly.net",
+            "https://cobalt.154.be",
+            "https://cobalt.jas.club",
+            "https://cobalt.feral-hosting.com",
+            # Fallback legacy/v7 if supported by code (removed for now, sticking to v10 mirrors)
         ]
 
         headers = {
