@@ -62,13 +62,11 @@ AFORISMI = [
 ]
 
 FUNNY_SOURCES = [
-    "https://www.tiktok.com/@khaby.lame",
-    "https://www.tiktok.com/@zachking",
-    "https://www.tiktok.com/@youneszarou",
-    "https://www.tiktok.com/@ox_zung",
-    "https://www.tiktok.com/@homm9k",
-    "https://www.tiktok.com/@jasonderulo",
-    "https://www.tiktok.com/@failarmy"
+    "https://www.tiktok.com/@stefano_cattivero",
+    "https://www.tiktok.com/@funnycat_2024",
+    "https://www.tiktok.com/@cat_lovers_2024",
+    "https://www.tiktok.com/@kittens",
+    "https://www.tiktok.com/@cute_cats_videos"
 ]
 
 NELLO_ERRORS = [
@@ -114,8 +112,8 @@ def detect_platform(url: str) -> str:
 # =========================
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Received /start from {update.effective_user.id}")
-    await update.message.reply_text("Mandami un link video e penso io a tutto 🔥")
+    logger.info(f"Received /start in chat {update.effective_chat.id} from {update.effective_user.id}")
+    await update.message.reply_text(f"Ciao! Il Chat ID di questo gruppo è: <code>{update.effective_chat.id}</code>\nMandami un link video e penso io a tutto 🔥", parse_mode=ParseMode.HTML)
 
 # =========================
 # DOWNLOAD HANDLER
@@ -370,16 +368,14 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
         info = await dl.download_video(video_url)
         
         if info.get("success") and info.get("type") == "video":
-             # Send video + poll
+             # Send video ONLY (no poll)
              caption = (
-                 f"🤣 <b>Video Divertente dell'Ora!</b>\n"
+                 f"🐱 <b>Gattini Divertenti!</b>\n"
                  f"👤 <b>Fonte:</b> <a href='{source}'>TikTok</a>\n"
-                 f"🔗 <a href='{video_url}'>Video Originale</a>\n\n"
-                 f"Cosa ne pensate?"
              )
              
              with open(info['file_path'], 'rb') as f:
-                 msg = await context.bot.send_video(
+                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=f,
                     caption=caption,
@@ -390,14 +386,6 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
                  os.remove(info['file_path'])
              except:
                  pass
-                 
-             # Send Poll
-             await context.bot.send_poll(
-                chat_id=chat_id,
-                question="Voto per questo video?",
-                options=["😂😂😂", "🙂 Carino", "😐 Meh", "🤮 Orribile"],
-                reply_to_message_id=msg.message_id
-             )
              
     except Exception as e:
         logger.error(f"Hourly video job failed: {e}")

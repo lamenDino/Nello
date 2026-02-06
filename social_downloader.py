@@ -220,8 +220,8 @@ class SocialMediaDownloader:
             opts['format'] = 'bestvideo+bestaudio/best'
             opts['merge_output_format'] = 'mp4'
             
-            # Use cookies on all attempts to avoid auth errors
-            if os.path.exists(self.youtube_cookies):
+            # Use cookies on first attempts, try without on last attempt (bypass geo-locked cookies)
+            if os.path.exists(self.youtube_cookies) and attempt < self.max_retries - 1:
                  opts['cookiefile'] = self.youtube_cookies
             
             opts['http_headers'].update({
