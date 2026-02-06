@@ -1416,10 +1416,11 @@ class SocialMediaDownloader:
         # Lista di istanze pubbliche (V10 compatible)
         # Nota: api.cobalt.tools richiede Turnstile/Key ora, quindi usiamo mirror community
         cobalt_instances = [
-            "https://cobalt.junker.wdh.gg",
-            "https://cobalt.kwiatekmiki.pl",
-            "https://cobalt.nowys.com",
-            # Aggiungere altre istanze se necessario
+            "https://cobalt.arms.tezcatlipoca.org",
+            "https://cobalt.xy24.eu",
+            "https://dl.khub.ky",
+            "https://cobalt.junker.wdh.gg", # Keep as backup
+            "https://cobalt.kwiatekmiki.pl", # Keep as backup
         ]
 
         headers = {
