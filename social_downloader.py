@@ -17,6 +17,11 @@ import time
 from typing import Dict, Optional, List, Tuple
 import http.cookiejar
 
+try:
+    import cloudscraper
+except ImportError:
+    cloudscraper = None
+
 import yt_dlp
 from yt_dlp.version import __version__ as yt_version
 import requests
@@ -1467,10 +1472,16 @@ class SocialMediaDownloader:
 
             try:
                 def _req():
+                    # Usa cloudscraper se disponibile per bypassare Cloudflare
                     # Abbassato timeout a 15s per saltare velocemente se lento
                     try:
-                        return requests.post(api_url, json=payload, headers=headers, timeout=15)
-                    except requests.exceptions.RequestException:
+                        if cloudscraper:
+                            scraper = cloudscraper.create_scraper()
+                            return scraper.post(api_url, json=payload, headers=headers, timeout=15)
+                        else:
+                            return requests.post(api_url, json=payload, headers=headers, timeout=15)
+                    except Exception as e:
+                        logger.warning(f"Cobalt request failed for {base_url}: {e}")
                         return None
                     
                 r = await loop.run_in_executor(None, _req)
