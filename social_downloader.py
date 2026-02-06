@@ -1521,7 +1521,6 @@ class SocialMediaDownloader:
 
         logger.error("All Cobalt instances failed.")
         return None
-            return None
 
     # --------------------------
     # Public API
