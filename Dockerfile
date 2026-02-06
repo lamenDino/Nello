@@ -6,7 +6,9 @@ RUN apt-get update && apt-get install -y \
     git \
     ffmpeg \
     libxml2-dev libxslt-dev \
+    nodejs \
  && rm -rf /var/lib/apt/lists/*
+
 
 COPY requirements.txt .
 RUN pip install --upgrade pip \
