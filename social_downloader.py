@@ -13,6 +13,7 @@ import os
 import asyncio
 import logging
 import tempfile
+import time
 from typing import Dict, Optional, List, Tuple
 import http.cookiejar
 
@@ -1402,6 +1403,101 @@ class SocialMediaDownloader:
             return None
 
     # --------------------------
+    # Cobalt API Fallback (The "No Cookies" Savior)
+    # --------------------------
+    
+    async def download_with_cobalt(self, url: str) -> Optional[Dict]:
+        """
+        Usa Cobalt API (https://github.com/imputnet/cobalt) per scaricare media 
+        senza usare cookie locali né yt-dlp direttamente sulla macchina.
+        Ottimo per YouTube/Insta/TikTok su server bloccati.
+        """
+        api_url = "https://api.cobalt.tools/api/json"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        payload = {
+            "url": url,
+            "vCodec": "h264",
+            "vQuality": "1080",
+            "aFormat": "mp3",
+            "filenamePattern": "basic"
+        }
+        
+        logger.info(f"Cobalt fallback triggered for: {url}")
+        
+        try:
+            # Esegue la richiesta in un thread separato per non bloccare
+            loop = asyncio.get_event_loop()
+            def _req():
+                return requests.post(api_url, json=payload, headers=headers, timeout=20)
+                
+            r = await loop.run_in_executor(None, _req)
+            
+            if r.status_code != 200:
+                logger.warning(f"Cobalt API error {r.status_code}: {r.text}")
+                return None
+                
+            data = r.json()
+            
+            # Casi di risposta: 
+            # 1. "url": link diretto al file
+            # 2. "picker": lista di file (video/audio/thumb)
+            
+            download_url = None
+            
+            if "url" in data:
+                download_url = data["url"]
+            elif "picker" in data and len(data["picker"]) > 0:
+                # Cerca il video
+                for item in data["picker"]:
+                    if item.get("type") == "video":
+                        download_url = item.get("url")
+                        break
+                # Se non trova video, prende il primo
+                if not download_url:
+                    download_url = data["picker"][0].get("url")
+            
+            if not download_url:
+                logger.warning(f"Cobalt API no url found in response: {data}")
+                return None
+                
+            # Scarica il file dal link di Cobalt
+            logger.info(f"Cobalt download url: {download_url}")
+            
+            filename = os.path.join(self.temp_dir, f"cobalt_{int(time.time())}.mp4")
+            
+            def _dl_file():
+                with requests.get(download_url, stream=True, timeout=60) as rx:
+                    rx.raise_for_status()
+                    with open(filename, 'wb') as f:
+                        for chunk in rx.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                return filename
+
+            saved_path = await loop.run_in_executor(None, _dl_file)
+            
+            if os.path.exists(saved_path) and os.path.getsize(saved_path) > 0:
+                return {
+                    'success': True,
+                    'type': 'video',
+                    'file_path': saved_path,
+                    'title': 'Contenuto (Cobalt)',
+                    'uploader': 'Sconosciuto',
+                    'platform': 'cobalt',
+                    'url': url
+                }
+                
+            return None
+            
+        except Exception as e:
+            logger.error(f"Cobalt fallback exception: {e}")
+            return None
+
+    # --------------------------
     # Public API
     # --------------------------
 
@@ -1436,6 +1532,8 @@ class SocialMediaDownloader:
         force_fallback = False
         title = 'Contenuto'
         uploader = 'Sconosciuto'
+        
+        # --- PHASE 1: STANDARD YT-DLP ATTEMPTS ---
         for attempt in range(self.max_retries):
             try:
                 logger.info(f"Tentativo {attempt + 1}/{self.max_retries} per {platform}: {clean_url}")
@@ -1448,7 +1546,8 @@ class SocialMediaDownloader:
                         delay = self.retry_delay * (2 ** attempt)
                         await asyncio.sleep(delay)
                         continue
-                    return {'success': False, 'error': self.get_error_message_for_platform(platform, 'extraction_failed')}
+                    # Se finiti tentativi yt-dlp, break e vai ai fallback
+                    break 
 
                 # Uploader/title (fallbacks)
                 uploader = info.get('uploader') or info.get('channel') or info.get('creator') or 'Sconosciuto'
@@ -1479,7 +1578,7 @@ class SocialMediaDownloader:
                         delay = self.retry_delay * (2 ** attempt)
                         await asyncio.sleep(delay)
                         continue
-                    return {'success': False, 'error': self.get_error_message_for_platform(platform, 'download_failed')}
+                    break # Vai ai fallback
 
                 return {
                     'success': True,
@@ -1496,59 +1595,32 @@ class SocialMediaDownloader:
                 err = str(e).lower()
                 logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
 
-                # Facebook Fallback for 404/Parse Error (posts)
-                if platform == 'facebook' and ('not found' in err or '404' in err or 'cannot parse' in err or 'parse' in err):
-                    # Try fallback even for videos (might find raw mp4 or cover image)
-                    logger.info("Facebook fallback triggered due to error.")
-                    fb_files = await self._facebook_fallback(clean_url)
-                    if fb_files:
-                        # Check extensions to determine type
-                        is_video_result = any(f.endswith('.mp4') for f in fb_files)
-                        
-                        result_data = {
-                            'success': True,
-                            'files': fb_files,
-                            'title': self.last_fallback_title or title,
-                            'uploader': uploader,
-                            'platform': platform,
-                            'url': clean_url
-                        }
-
-                        if is_video_result and len(fb_files) == 1:
-                            result_data['type'] = 'video'
-                            result_data['file_path'] = fb_files[0]
-                        else:
-                            result_data['type'] = 'carousel'
-                            
-                        return result_data
-
                 # Errori specifici
                 if 'sign in' in err or 'bot' in err:
-                    return {'success': False, 'error': '🤖 YouTube chiede autenticazione (bot detection). Riprova tra poco.'}
+                    logger.warning("Bot detection! Breaking to shortcuts.")
+                    break # break to safe fallbacks
                 if 'cannot parse' in err or 'parse' in err:
-                    return {'success': False, 'error': '⚠️ Facebook ha cambiato struttura. Riprova con un altro reel.'}
+                    break
                 if 'does not pass match_filter' in err:
                     return {'success': False, 'error': '⚠️ Questo video è troppo lungo. Scarico solo YouTube Shorts (max 120s).'}
                 if 'no video formats found' in err or 'unsupported url' in err:
-                    # Forza fallback foto per Instagram/TikTok quando non trova video o URL non supportato
-                    if platform in ['instagram', 'tiktok']:
-                        force_fallback = True
-                        # Non returnare qui, lascia continuare il loop e poi esegui il fallback
-                        if attempt < self.max_retries - 1:
-                            delay = self.retry_delay * (2 ** attempt)
-                            await asyncio.sleep(delay)
-                        continue
-                    
-                    # For Facebook "Unsupported URL", we should try fallback too
-                    if platform == 'facebook':
-                        force_fallback = True
-                        break # Break retry loop to go to fallback section below
-
-                    return {'success': False, 'error': '🔒 Contenuto privato o inaccessibile.'}
+                    break
 
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
                     await asyncio.sleep(delay)
+
+        # --- PHASE 2: EMERGENCY FALLBACKS ---
+        logger.info("Entering Emergency Fallback Phase...")
+
+        # 1. COBALT API (The Magic Bullet for No-Cookie environments)
+        # Proviamo Cobalt per tutto (YouTube, Instagram, TikTok, Twitter, Facebook)
+        # Se yt-dlp ha fallito, Cobalt spesso riesce perché usa i propri IP puliti.
+        cobalt_result = await self.download_with_cobalt(clean_url)
+        if cobalt_result:
+            return cobalt_result
+
+        # 2. Platform-Specific Scrapers (Last Resort)
 
         if 'facebook' in platform:
              try:
@@ -1571,14 +1643,11 @@ class SocialMediaDownloader:
             try:
                 # Explicit unpacking check
                 fallback_resp = await self._tiktok_photo_fallback(clean_url)
-                logger.info(f"DEBUG_TIKTOK: type={type(fallback_resp)}")
                 if isinstance(fallback_resp, tuple) and len(fallback_resp) == 2:
                     res_files, res_title = fallback_resp
                 else:
                     res_files = fallback_resp
                     res_title = ""
-                
-                logger.info(f"DEBUG_TIKTOK: res_files type={type(res_files)}")
                 
                 if res_files:
                     return {
@@ -1638,5 +1707,6 @@ class SocialMediaDownloader:
                         }
             except Exception as e:
                 logger.warning(f"Instagram fallback failed: {e}")
+
 
         return {'success': False, 'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'}
