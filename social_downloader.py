@@ -111,7 +111,7 @@ class SocialMediaDownloader:
             return local_path # Ritorna il percorso locale come default per evitare crash immediati su path null
 
         # Percorsi cookies
-        self.instagram_cookies = resolve_cookie_path('cookies.txt', ['INSTAGRAM_COOKIES', 'COOKIES_TXT'])
+        self.instagram_cookies = resolve_cookie_path('instagram_cookies.txt', ['INSTAGRAM_COOKIES', 'COOKIES_TXT'])
         self.youtube_cookies = resolve_cookie_path('youtube_cookies.txt', 'YOUTUBE_COOKIES')
         self.tiktok_cookies = resolve_cookie_path('tiktok_cookies.txt', 'TIKTOK_COOKIES')
         self.facebook_cookies = resolve_cookie_path('facebook_cookies.txt', 'FACEBOOK_COOKIES')
@@ -835,10 +835,8 @@ class SocialMediaDownloader:
             'Referer': 'https://www.tiktok.com/',
             'Origin': 'https://www.tiktok.com'
         }
-        # Force use of ttcokies.txt if available, else tiktok_cookies.txt
-        cookie_path = os.path.join(os.path.dirname(__file__), 'ttcokies.txt')
-        if not os.path.exists(cookie_path):
-             cookie_path = self.tiktok_cookies
+        # Use resolved tiktok_cookies
+        cookie_path = self.tiktok_cookies
         
         cookies = self._load_netscape_cookies(cookie_path)
         if cookies:
