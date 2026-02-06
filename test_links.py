@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 
 async def test_extraction():
     urls = [
-        "https://www.youtube.com/shorts/Wodv9ehFgTo"
+        "https://www.youtube.com/shorts/uN1a4WdZRCU",
+        "https://www.youtube.com/shorts/lBPwEsI4a9g"
     ]
     
     dl = SocialMediaDownloader(debug=True)
