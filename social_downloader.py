@@ -1408,93 +1408,119 @@ class SocialMediaDownloader:
     
     async def download_with_cobalt(self, url: str) -> Optional[Dict]:
         """
-        Usa Cobalt API (https://github.com/imputnet/cobalt) per scaricare media 
+        Usa Cobalt API v10 (https://github.com/imputnet/cobalt) per scaricare media 
         senza usare cookie locali né yt-dlp direttamente sulla macchina.
         Ottimo per YouTube/Insta/TikTok su server bloccati.
+        Supporta failover su più istanze pubbliche.
         """
-        api_url = "https://api.cobalt.tools/api/json"
+        # Lista di istanze pubbliche (V10 compatible)
+        # Nota: api.cobalt.tools richiede Turnstile/Key ora, quindi usiamo mirror community
+        cobalt_instances = [
+            "https://cobalt.junker.wdh.gg",
+            "https://cobalt.kwiatekmiki.pl",
+            "https://cobalt.nowys.com",
+            # Aggiungere altre istanze se necessario
+        ]
+
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         
+        # Payload aggiornato per API v10 (camelCase)
         payload = {
             "url": url,
-            "vCodec": "h264",
-            "vQuality": "1080",
-            "aFormat": "mp3",
-            "filenamePattern": "basic"
+            "videoQuality": "1080",
+            "audioFormat": "mp3",
+            "filenameStyle": "basic",
+            # "youtubeVideoCodec": "h264" # Default h264
         }
         
         logger.info(f"Cobalt fallback triggered for: {url}")
         
-        try:
-            # Esegue la richiesta in un thread separato per non bloccare
-            loop = asyncio.get_event_loop()
-            def _req():
-                return requests.post(api_url, json=payload, headers=headers, timeout=20)
-                
-            r = await loop.run_in_executor(None, _req)
-            
-            if r.status_code != 200:
-                logger.warning(f"Cobalt API error {r.status_code}: {r.text}")
-                return None
-                
-            data = r.json()
-            
-            # Casi di risposta: 
-            # 1. "url": link diretto al file
-            # 2. "picker": lista di file (video/audio/thumb)
-            
-            download_url = None
-            
-            if "url" in data:
-                download_url = data["url"]
-            elif "picker" in data and len(data["picker"]) > 0:
-                # Cerca il video
-                for item in data["picker"]:
-                    if item.get("type") == "video":
-                        download_url = item.get("url")
-                        break
-                # Se non trova video, prende il primo
-                if not download_url:
-                    download_url = data["picker"][0].get("url")
-            
-            if not download_url:
-                logger.warning(f"Cobalt API no url found in response: {data}")
-                return None
-                
-            # Scarica il file dal link di Cobalt
-            logger.info(f"Cobalt download url: {download_url}")
-            
-            filename = os.path.join(self.temp_dir, f"cobalt_{int(time.time())}.mp4")
-            
-            def _dl_file():
-                with requests.get(download_url, stream=True, timeout=60) as rx:
-                    rx.raise_for_status()
-                    with open(filename, 'wb') as f:
-                        for chunk in rx.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                return filename
+        loop = asyncio.get_event_loop()
 
-            saved_path = await loop.run_in_executor(None, _dl_file)
-            
-            if os.path.exists(saved_path) and os.path.getsize(saved_path) > 0:
-                return {
-                    'success': True,
-                    'type': 'video',
-                    'file_path': saved_path,
-                    'title': 'Contenuto (Cobalt)',
-                    'uploader': 'Sconosciuto',
-                    'platform': 'cobalt',
-                    'url': url
-                }
+        for base_url in cobalt_instances:
+            api_url = f"{base_url}/" # V10 usa root endpoint
+            logger.info(f"Trying Cobalt instance: {api_url}")
+
+            try:
+                def _req():
+                    # Abbassato timeout a 15s per saltare velocemente se lento
+                    return requests.post(api_url, json=payload, headers=headers, timeout=15)
+                    
+                r = await loop.run_in_executor(None, _req)
                 
-            return None
-            
-        except Exception as e:
-            logger.error(f"Cobalt fallback exception: {e}")
+                if r.status_code == 200:
+                    data = r.json()
+                    
+                    # Analisi risposta v10/v7 compatibile
+                    # v10: status=tunnel/redirect/picker
+                    status = data.get("status")
+                    
+                    download_url = None
+                    
+                    if status in ["tunnel", "redirect"]:
+                        download_url = data.get("url")
+                    elif status == "picker":
+                        picker_items = data.get("picker", [])
+                        if picker_items:
+                            # Cerca video
+                            for item in picker_items:
+                                if item.get("type") == "video":
+                                    download_url = item.get("url")
+                                    break
+                            # Se non trova video, prende il primo (es. foto)
+                            if not download_url:
+                                download_url = picker_items[0].get("url")
+                    elif "url" in data: # Fallback per vecchie versioni (v7) se qualche istanza è vecchia
+                        download_url = data["url"]
+
+                    if download_url:
+                        logger.info(f"Cobalt download URL found via {base_url}: {download_url}")
+                        
+                        # Scarica il file
+                        def _dl_file():
+                            return requests.get(download_url, stream=True, timeout=60)
+                        
+                        resp = await loop.run_in_executor(None, _dl_file)
+                        
+                        if resp.status_code == 200:
+                            # Salva su file temp
+                            ext = "mp4" # Default
+                            # Tentativo di indovinare estensione da Content-Type
+                            ctype = resp.headers.get("Content-Type", "")
+                            if "image" in ctype:
+                                ext = "jpg"
+                            elif "audio" in ctype:
+                                ext = "mp3"
+                                
+                            filename = os.path.join(self.temp_dir, f"cobalt_{int(time.time())}.{ext}")
+                            
+                            with open(filename, 'wb') as f:
+                                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                                    if chunk:
+                                        f.write(chunk)
+                                        
+                            if os.path.getsize(filename) > 0:
+                                return {
+                                    "success": True,
+                                    "type": "video" if ext == "mp4" else "image", # Semplificazione, Cobalt ritorna tipicamente video uniti
+                                    "file_path": filename,
+                                    "title": f"Downloaded via Cobalt ({base_url})",
+                                    "files": [filename] if ext != "mp4" else [] # Per compatibilità
+                                }
+                
+                # Se status code != 200 o data parsing fallito, logga e continua
+                logger.warning(f"Cobalt instance {base_url} failed with {r.status_code}: {r.text[:200]}")
+
+            except Exception as e:
+                logger.warning(f"Cobalt instance {base_url} error: {e}")
+                continue # Prova la prossima istanza
+
+        logger.error("All Cobalt instances failed.")
+        return None
             return None
 
     # --------------------------

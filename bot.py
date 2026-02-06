@@ -120,222 +120,239 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    url = msg.text.strip()
-    logger.info(f"Received message from {update.effective_user.id}: {url}")
+    text = (msg.text or "").strip()
+    
+    # 1. Split text into potential URLs (handle support for multiple links)
+    potential_urls = text.split()
+    valid_urls = [u for u in potential_urls if is_supported_link(u)]
 
-    if not is_supported_link(url):
+    if not valid_urls:
         return
 
-    loading = await context.bot.send_message(msg.chat_id, "⏳ Download in corso...")
+    logger.info(f"Received message from {update.effective_user.id} with {len(valid_urls)} valid links")
 
+    # Inizializza downloader una volta sola per efficienza
     dl = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
+    
+    # Per evitare spam di errori, cancelliamo messaggio originale su primo successo
+    original_message_deleted = False
 
-    try:
-        info = await dl.download_video(url)
-
-        # ❌ fallimento → informa l'utente e silenzio totale
-        if not info or not info.get("success"):
-            nello_joke = random.choice(NELLO_ERRORS)
-            specific_error = info.get('error', 'Errore sconosciuto')
-            
-            try:
-                await context.bot.send_message(
-                    chat_id=msg.chat_id,
-                    text=f"{nello_joke}\n\n⚠️ <i>{escape(specific_error)}</i>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-            await loading.delete()
-            return
-
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-
-        # incrementa ranking (1 contenuto = 1 punto, sia video che carosello)
-        video_ranking[msg.from_user.id] += 1
-
-        # Truncate title to 3 lines max
-        raw_title = info.get('title', 'N/A')
-        if raw_title:
-             # Split lines, take first 3
-             lines = raw_title.split('\n')
-             if len(lines) > 3:
-                 raw_title = '\n'.join(lines[:3]) + "..."
-             # Also strict char limit just in case
-             if len(raw_title) > 300:
-                 raw_title = raw_title[:300] + "..."
-
-        caption = (
-            f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
-            f"👤 <b>Video inviato da :</b> {escape(msg.from_user.full_name)}\n"
-            f"🔗 <b>Link originale :</b> {escape(url)}\n"
-            f"📝 <b>Meta info video :</b> {escape(raw_title)}"
+    for i, url in enumerate(valid_urls):
+        # Feedback di caricamento differenziato per link
+        count_str = f"({i+1}/{len(valid_urls)})" if len(valid_urls) > 1 else ""
+        loading = await context.bot.send_message(
+            msg.chat_id, 
+            f"⏳ Download in corso {count_str}...\n🔗 {escape(url)}",
+            parse_mode=ParseMode.HTML
         )
 
-        # =========================
-        # INVIO CONTENUTI
-        # =========================
+        try:
+            info = await dl.download_video(url)
 
-        # === VIDEO ===
-        if info.get("type", "video") == "video":
-            with open(info["file_path"], "rb") as f:
-                await context.bot.send_video(
-                    chat_id=msg.chat_id,
-                    video=f,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
-                )
+            # ❌ fallimento → informa l'utente e passa al prossimo
+            if not info or not info.get("success"):
+                nello_joke = random.choice(NELLO_ERRORS)
+                specific_error = info.get('error', 'Errore sconosciuto')
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=msg.chat_id,
+                        text=f"{nello_joke}\n\n⚠️ <i>{escape(specific_error)}</i>\n(Link: {escape(url)})",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+                try:
+                    await loading.delete()
+                except Exception:
+                    pass
+                continue
+
+            # Se successo, cancella il messaggio originale (solo la prima volta)
+            if not original_message_deleted:
+                try:
+                    await msg.delete()
+                    original_message_deleted = True
+                except Exception:
+                    pass
+
+            # incrementa ranking (1 contenuto = 1 punto, sia video che carosello)
+            video_ranking[msg.from_user.id] += 1
+
+            # Truncate title to 3 lines max
+            raw_title = info.get('title', 'N/A')
+            if raw_title:
+                 # Split lines, take first 3
+                 lines = raw_title.split('\n')
+                 if len(lines) > 3:
+                     raw_title = '\n'.join(lines[:3]) + "..."
+                 # Also strict char limit just in case
+                 if len(raw_title) > 300:
+                     raw_title = raw_title[:300] + "..."
+
+            caption = (
+                f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
+                f"👤 <b>Video inviato da :</b> {escape(msg.from_user.full_name)}\n"
+                f"🔗 <b>Link originale :</b> {escape(url)}\n"
+                f"📝 <b>Meta info video :</b> {escape(raw_title)}"
+            )
+
+            # =========================
+            # INVIO CONTENUTI
+            # =========================
+
+            # === VIDEO ===
+            if info.get("type", "video") == "video":
+                with open(info["file_path"], "rb") as f:
+                    await context.bot.send_video(
+                        chat_id=msg.chat_id,
+                        video=f,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    )
+                try:
+                    os.remove(info["file_path"])
+                except Exception:
+                    pass
+
+            # === CAROSELLO FOTO (ALBUM UNICO) ===
+            elif info.get("type") == "carousel":
+                files = info.get("files", [])
+                if not files:
+                    await loading.delete()
+                    continue
+
+                # Se è un solo file, inviamolo come media singolo
+                if len(files) == 1:
+                    photo_path = files[0]
+                    ext = os.path.splitext(photo_path)[1].lower()
+                    is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+                    
+                    try:
+                        with open(photo_path, "rb") as f:
+                            if is_video:
+                                await context.bot.send_video(
+                                    chat_id=msg.chat_id,
+                                    video=f,
+                                    caption=caption,
+                                    parse_mode=ParseMode.HTML
+                                )
+                            else:
+                                await context.bot.send_photo(
+                                    chat_id=msg.chat_id,
+                                    photo=f,
+                                    caption=caption,
+                                    parse_mode=ParseMode.HTML
+                                )
+                    except Exception as e:
+                        err_str = str(e).lower()
+                        if 'caption' in err_str and 'too long' in err_str:
+                             logger.warning("Caption too long for single item, truncating...")
+                             short_caption = caption[:950] + "..."
+                             try:
+                                 with open(photo_path, "rb") as f:
+                                    if is_video:
+                                        await context.bot.send_video(chat_id=msg.chat_id, video=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                                    else:
+                                        await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                             except Exception as inner_e:
+                                 logger.error(f"Error sending single item matching caption retry: {inner_e}")
+                                 await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (errore imprevisto).")
+                        else:
+                            logger.error(f"Error sending single carousel item: {e}")
+                            await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio del media.")
+                    finally:
+                         try:
+                            os.remove(photo_path)
+                         except:
+                            pass
+                
+                else: 
+                    # Telegram: max 10 media in un media_group
+                    MAX_GROUP = 10
+                    chunks = [files[i:i + MAX_GROUP] for i in range(0, len(files), MAX_GROUP)]
+
+                    for chunk_index, chunk in enumerate(chunks):
+                        media = []
+                        opened = []  # teniamo i file handle aperti finché non inviamo
+
+                        try:
+                            for c_i, photo_path in enumerate(chunk):
+                                f = open(photo_path, "rb")
+                                opened.append((f, photo_path))
+
+                                # Caption solo sul primo media del primo chunk
+                                ext = os.path.splitext(photo_path)[1].lower()
+                                is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+
+                                if chunk_index == 0 and c_i == 0:
+                                    if is_video:
+                                        media.append(InputMediaVideo(
+                                            media=f,
+                                            caption=caption,
+                                            parse_mode=ParseMode.HTML
+                                        ))
+                                    else:
+                                        media.append(InputMediaPhoto(
+                                            media=f,
+                                            caption=caption,
+                                            parse_mode=ParseMode.HTML
+                                        ))
+                                else:
+                                    if is_video:
+                                        media.append(InputMediaVideo(media=f))
+                                    else:
+                                        media.append(InputMediaPhoto(media=f))
+
+                            try:
+                                await context.bot.send_media_group(
+                                    chat_id=msg.chat_id,
+                                    media=media
+                                )
+                            except Exception as e:
+                               # Handle "caption too long" specifically
+                               err_str = str(e).lower()
+                               if 'caption' in err_str and 'too long' in err_str:
+                                   logger.warning("Caption too long, truncating and retrying...")
+                                   # Truncate caption on the first item
+                                   if len(media) > 0:
+                                       media[0].caption = caption[:950] + "..."
+                                       try:
+                                           await context.bot.send_media_group(
+                                                chat_id=msg.chat_id,
+                                                media=media
+                                           )
+                                       except Exception as inner_e:
+                                           logger.error(f"Failed retry sending media group: {inner_e}")
+                                           await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (didascalia troppo lunga).")
+                               else:
+                                    logger.error(f"Send media group error: {e}")
+                                    await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio dell'album.")
+
+                        finally:
+                            # Chiudi handle e cancella file
+                            for f, photo_path in opened:
+                                try:
+                                    f.close()
+                                except Exception:
+                                    pass
+                                try:
+                                    os.remove(photo_path)
+                                except Exception:
+                                    pass
+
+            await loading.delete() # Cancella "Download in corso" per questo link
+
+        except Exception as e:
+            logger.error(f"Errore critico durante loop {url}: {e}", exc_info=True)
             try:
-                os.remove(info["file_path"])
+                await context.bot.send_message(msg.chat_id, f"❌ Si è verificato un errore imprevisto su {url}.")
             except Exception:
                 pass
-
-        # === CAROSELLO FOTO (ALBUM UNICO) ===
-        elif info.get("type") == "carousel":
-            files = info.get("files", [])
-            if not files:
+            try:
                 await loading.delete()
-                return
-
-            # Se è un solo file, inviamolo come media singolo (send_media_group richiede 2-10 elementi)
-            if len(files) == 1:
-                photo_path = files[0]
-                ext = os.path.splitext(photo_path)[1].lower()
-                is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
-                
-                try:
-                    with open(photo_path, "rb") as f:
-                        if is_video:
-                            await context.bot.send_video(
-                                chat_id=msg.chat_id,
-                                video=f,
-                                caption=caption,
-                                parse_mode=ParseMode.HTML
-                            )
-                        else:
-                            await context.bot.send_photo(
-                                chat_id=msg.chat_id,
-                                photo=f,
-                                caption=caption,
-                                parse_mode=ParseMode.HTML
-                            )
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if 'caption' in err_str and 'too long' in err_str:
-                         logger.warning("Caption too long for single item, truncating...")
-                         short_caption = caption[:950] + "..."
-                         try:
-                             with open(photo_path, "rb") as f:
-                                if is_video:
-                                    await context.bot.send_video(chat_id=msg.chat_id, video=f, caption=short_caption, parse_mode=ParseMode.HTML)
-                                else:
-                                    await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
-                         except Exception as inner_e:
-                             logger.error(f"Error sending single item matching caption retry: {inner_e}")
-                             await msg.reply_text("⚠️ Errore nell'invio (errore imprevisto).")
-                    else:
-                        logger.error(f"Error sending single carousel item: {e}")
-                        await msg.reply_text("⚠️ Errore nell'invio del media.")
-                finally:
-                     try:
-                        os.remove(photo_path)
-                     except:
-                        pass
-                
-                await loading.delete()
-                return
-
-            # Telegram: max 10 media in un media_group
-            # Se vuoi, puoi aumentare spezzando in più album.
-            MAX_GROUP = 10
-            chunks = [files[i:i + MAX_GROUP] for i in range(0, len(files), MAX_GROUP)]
-
-            for chunk_index, chunk in enumerate(chunks):
-                media = []
-                opened = []  # teniamo i file handle aperti finché non inviamo
-
-                try:
-                    for i, photo_path in enumerate(chunk):
-                        f = open(photo_path, "rb")
-                        opened.append((f, photo_path))
-
-                        # Caption solo sul primo media del primo chunk
-                        ext = os.path.splitext(photo_path)[1].lower()
-                        is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
-
-                        if chunk_index == 0 and i == 0:
-                            if is_video:
-                                media.append(InputMediaVideo(
-                                    media=f,
-                                    caption=caption,
-                                    parse_mode=ParseMode.HTML
-                                ))
-                            else:
-                                media.append(InputMediaPhoto(
-                                    media=f,
-                                    caption=caption,
-                                    parse_mode=ParseMode.HTML
-                                ))
-                        else:
-                            if is_video:
-                                media.append(InputMediaVideo(media=f))
-                            else:
-                                media.append(InputMediaPhoto(media=f))
-
-                    try:
-                        await context.bot.send_media_group(
-                            chat_id=msg.chat_id,
-                            media=media
-                        )
-                    except Exception as e:
-                       # Handle "caption too long" specifically
-                       err_str = str(e).lower()
-                       if 'caption' in err_str and 'too long' in err_str:
-                           logger.warning("Caption too long, truncating and retrying...")
-                           # Truncate caption on the first item
-                           if len(media) > 0:
-                               short_caption = caption[:950] + "..."
-                               media[0].caption = short_caption
-                               
-                               try:
-                                   await context.bot.send_media_group(
-                                        chat_id=msg.chat_id,
-                                        media=media
-                                   )
-                               except Exception as inner_e:
-                                   logger.error(f"Failed retry sending media group: {inner_e}")
-                                   await msg.reply_text("⚠️ Errore nell'invio (didascalia troppo lunga).")
-                       else:
-                            logger.error(f"Send media group error: {e}")
-                            await msg.reply_text("⚠️ Errore nell'invio dell'album.")
-
-                finally:
-                    # Chiudi handle e cancella file
-                    for f, photo_path in opened:
-                        try:
-                            f.close()
-                        except Exception:
-                            pass
-                        try:
-                            os.remove(photo_path)
-                        except Exception:
-                            pass
-
-        await loading.delete()
-
-    except Exception as e:
-        logger.error(f"Errore critico: {e}", exc_info=True)
-        try:
-            await msg.reply_text("❌ Si è verificato un errore imprevisto durante l'elaborazione.")
-        except Exception:
-            pass
-        try:
-            await loading.delete()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 # =========================
 # HOURLY FUNNY VIDEO JOB
