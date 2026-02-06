@@ -204,39 +204,59 @@ class SocialMediaDownloader:
         if self.proxy:
             opts['proxy'] = self.proxy
 
-        # Instagram cookies
-        if 'instagram' in url.lower() and os.path.exists(self.instagram_cookies):
-            opts['cookiefile'] = self.instagram_cookies
+        # --- STRATEGIA DI DOWNLOAD (Priorità No-Cookies su Render) ---
+        # Attempt 0: NO Cookies (prova accesso pubblico/mobile client)
+        # Attempt 1: SI Cookies (se disponibili, fallback authenticated)
+        # Attempt 2: NO Cookies (fallback aggressivo / scraping)
 
-        # YouTube: cookies + headers
+        # Instagram
+        if 'instagram' in url.lower():
+            # Tentativo 0: Senza cookies (spesso funziona meglio su IP server puliti)
+            if attempt == 0:
+                pass 
+            # Tentativo 1: Con cookies (se esistono)
+            elif attempt == 1 and os.path.exists(self.instagram_cookies):
+                 opts['cookiefile'] = self.instagram_cookies
+            # Tentativo 2: Con cookies (ultimo tentativo)
+            elif attempt >= 2 and os.path.exists(self.instagram_cookies):
+                 opts['cookiefile'] = self.instagram_cookies
+
+        # YouTube: strategie anti-block
         if 'youtube' in url.lower() or 'youtu.be' in url.lower():
-            # Shorts detected via URL structure or duration
-            # Rimosso match_filters duration per evitare falsi positivi "Format not available"
-            # opts['match_filters'] = ['duration<=600']
-            
-            # Strategia semplificata al massimo per evitare errori
-            # Usiamo 'best' che lascia decidere a yt-dlp il formato migliore disponibile
-            # e poi chiediamo di convertirlo in mp4 se necessario
             opts['format'] = 'bestvideo+bestaudio/best'
             opts['merge_output_format'] = 'mp4'
-            
-            # Use cookies on first attempts, try without on last attempt (bypass geo-locked cookies)
-            if os.path.exists(self.youtube_cookies) and attempt < self.max_retries - 1:
-                 opts['cookiefile'] = self.youtube_cookies
             
             opts['http_headers'].update({
                 'Referer': 'https://www.youtube.com/',
                 'Origin': 'https://www.youtube.com',
             })
 
-        # Facebook headers
+            # Attempt 0: Android Client (No Cookies) - Molto efficace per Shorts
+            if attempt == 0:
+                opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
+            
+            # Attempt 1: iOS Client (No Cookies)
+            elif attempt == 1:
+                opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
+
+            # Attempt 2: Web Client Standard + Cookies (se ci sono)
+            else:
+                if os.path.exists(self.youtube_cookies):
+                    opts['cookiefile'] = self.youtube_cookies
+                # else: fallback standard web client
+
+        # Facebook
         if 'facebook' in url.lower() or 'fb.' in url.lower():
-            if os.path.exists(self.facebook_cookies):
-                opts['cookiefile'] = self.facebook_cookies
             opts['http_headers'].update({
                 'Referer': 'https://www.facebook.com/',
                 'Origin': 'https://www.facebook.com',
             })
+            
+            # Facebook è difficile. 
+            # Attempt 0: No Cookies (Public access)
+            # Attempt 1+: Cookies
+            if attempt > 0 and os.path.exists(self.facebook_cookies):
+                opts['cookiefile'] = self.facebook_cookies
 
         # TikTok headers
         if 'tiktok' in url.lower():
@@ -244,8 +264,8 @@ class SocialMediaDownloader:
                 'Referer': 'https://www.tiktok.com/',
                 'Origin': 'https://www.tiktok.com',
             })
-            # Use cookies if available (some TikTok content requires login)
-            if os.path.exists(self.tiktok_cookies):
+            # Use cookies only on retries or if forced
+            if attempt > 0 and os.path.exists(self.tiktok_cookies):
                 opts['cookiefile'] = self.tiktok_cookies
 
         return opts
@@ -1314,19 +1334,8 @@ class SocialMediaDownloader:
         try:
             opts = self.get_ydl_opts(url, attempt)
             
-            # YouTube Shorts fallback strategy for Render/Datacenters
-            if ('youtube' in url or 'youtu.be' in url) and attempt > 0:
-                # Se non è il primo tentativo, prova strategie diverse
-                if attempt == 1:
-                    # Tentativo 2: No cookies e client Android (spesso bypassa controlli web)
-                    opts.pop('cookiefile', None)
-                    opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
-                    logger.info("Retrying YouTube with Android client (no cookies)...")
-                elif attempt == 2:
-                    # Tentativo 3: Client iOS
-                    opts.pop('cookiefile', None)
-                    opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
-                    logger.info("Retrying YouTube with iOS client (no cookies)...")
+            # Nota: Strategie specifiche (es. Android client per Youtube) sono ora gestite
+            # direttamente dentro get_ydl_opts in base al numero del tentativo.
             
             loop = asyncio.get_event_loop()
 
