@@ -65,7 +65,6 @@ FUNNY_SOURCES = [
     "https://www.tiktok.com/@stefano_cattivero",
     "https://www.tiktok.com/@funnycat_2024",
     "https://www.tiktok.com/@cat_lovers_2024",
-    "https://www.tiktok.com/@kittens",
     "https://www.tiktok.com/@cute_cats_videos"
 ]
 
@@ -354,20 +353,24 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
     if now.hour < 9:
         return
 
-    chat_id = GROUP_CHAT_ID
-    source = random.choice(FUNNY_SOURCES)
+    # Log chat destination
+    logger.info(f"Hourly Funny Job: Sending to GROUP_CHAT_ID={GROUP_CHAT_ID}")
+
     dl = SocialMediaDownloader()
     
-    try:
-        # Get random video url
-        video_url = await dl.get_random_video_url(source)
-        if not video_url:
-            return 
+    # Try up to 3 sources before giving up
+    for _ in range(3):
+        source = random.choice(FUNNY_SOURCES)
+        try:
+            # Get random video url
+            video_url = await dl.get_random_video_url(source)
+            if not video_url:
+                continue 
+                
+            # Download
+            info = await dl.download_video(video_url)
             
-        # Download
-        info = await dl.download_video(video_url)
-        
-        if info.get("success") and info.get("type") == "video":
+            if info.get("success") and info.get("type") == "video":
              # Send video ONLY (no poll)
              caption = (
                  f"🐱 <b>Gattini Divertenti!</b>\n"
@@ -376,7 +379,7 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
              
              with open(info['file_path'], 'rb') as f:
                  await context.bot.send_video(
-                    chat_id=chat_id,
+                    chat_id=GROUP_CHAT_ID,
                     video=f,
                     caption=caption,
                     parse_mode=ParseMode.HTML
@@ -387,7 +390,12 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
              except:
                  pass
              
-    except Exception as e:
+             # Break loop on success
+             break
+             
+        except Exception as e:
+            logger.error(f"Funny video loop error on source {source}: {e}")
+            continue
         logger.error(f"Hourly video job failed: {e}")
 
 # =========================

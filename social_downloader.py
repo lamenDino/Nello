@@ -1313,6 +1313,21 @@ class SocialMediaDownloader:
         """Download singolo (video) con yt-dlp"""
         try:
             opts = self.get_ydl_opts(url, attempt)
+            
+            # YouTube Shorts fallback strategy for Render/Datacenters
+            if ('youtube' in url or 'youtu.be' in url) and attempt > 0:
+                # Se non è il primo tentativo, prova strategie diverse
+                if attempt == 1:
+                    # Tentativo 2: No cookies e client Android (spesso bypassa controlli web)
+                    opts.pop('cookiefile', None)
+                    opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
+                    logger.info("Retrying YouTube with Android client (no cookies)...")
+                elif attempt == 2:
+                    # Tentativo 3: Client iOS
+                    opts.pop('cookiefile', None)
+                    opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
+                    logger.info("Retrying YouTube with iOS client (no cookies)...")
+            
             loop = asyncio.get_event_loop()
 
             def _download():
