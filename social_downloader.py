@@ -1414,13 +1414,19 @@ class SocialMediaDownloader:
         Supporta failover su più istanze pubbliche.
         """
         # Lista di istanze pubbliche (V10 compatible)
-        # Nota: api.cobalt.tools richiede Turnstile/Key ora, quindi usiamo mirror community
+        # Nota: api.cobalt.tools richiede Turnstile/Key ora, quindi, usiamo mirror community
+        # Aggiornato al 2026/02
         cobalt_instances = [
+            "https://cobalt.stream",
+            "https://cobalt.kep.io",
+            "https://cobalt.7th.ch",
+            "https://cobalt.q11.app",
+            "https://co.wuk.sh", 
+            "https://cobalt.tools", # Tentativo finale (ufficiale)
+            # Backup instances (often flaky)
             "https://cobalt.arms.tezcatlipoca.org",
             "https://cobalt.xy24.eu",
             "https://dl.khub.ky",
-            "https://cobalt.junker.wdh.gg", # Keep as backup
-            "https://cobalt.kwiatekmiki.pl", # Keep as backup
         ]
 
         headers = {
@@ -1449,11 +1455,14 @@ class SocialMediaDownloader:
             try:
                 def _req():
                     # Abbassato timeout a 15s per saltare velocemente se lento
-                    return requests.post(api_url, json=payload, headers=headers, timeout=15)
+                    try:
+                        return requests.post(api_url, json=payload, headers=headers, timeout=15)
+                    except requests.exceptions.RequestException:
+                        return None
                     
                 r = await loop.run_in_executor(None, _req)
                 
-                if r.status_code == 200:
+                if r and r.status_code == 200:
                     data = r.json()
                     
                     # Analisi risposta v10/v7 compatibile
@@ -1514,7 +1523,10 @@ class SocialMediaDownloader:
                                 }
                 
                 # Se status code != 200 o data parsing fallito, logga e continua
-                logger.warning(f"Cobalt instance {base_url} failed with {r.status_code}: {r.text[:200]}")
+                if r:
+                     logger.warning(f"Cobalt instance {base_url} failed with {r.status_code}: {r.text[:200]}")
+                else:
+                     logger.warning(f"Cobalt instance {base_url} failed (connection error)")
 
             except Exception as e:
                 logger.warning(f"Cobalt instance {base_url} error: {e}")
