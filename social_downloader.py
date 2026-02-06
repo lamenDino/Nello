@@ -40,7 +40,14 @@ class SocialMediaDownloader:
 
         # Funzione helper per risolvere i path dei cookie (Supporto Render Secret Files & Env Vars)
         def resolve_cookie_path(filename, env_var_names=None):
-            # 1. Cerca nelle variabili d'ambiente (PRIORITÀ ALTA per Render)
+            # 1. Cerca PRIMA nella directory corrente (git repo) per permettere l'override
+            # Questo permette di fixare i cookie semplicemente pushando un nuovo file, ignorando i secret vecchi
+            local_path = os.path.join(os.path.dirname(__file__), filename)
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 10:
+                logger.info(f"Uso cookie locale (repository) prioritario: {local_path}")
+                return local_path
+
+            # 2. Cerca nelle variabili d'ambiente (PRIORITÀ ALTA per Render)
             if env_var_names:
                 if isinstance(env_var_names, str):
                     env_var_names = [env_var_names]
@@ -58,15 +65,15 @@ class SocialMediaDownloader:
                         except Exception as e:
                             logger.error(f"Errore scrittura cookie da env {env_var}: {e}")
 
-            # 2. Cerca in /etc/secrets/ (standard Render Secret Files)
+            # 3. Cerca in /etc/secrets/ (standard Render Secret Files)
             found_secret_path = None
             
-            # 2a. Cerca con il filename originale (es. cookies.txt)
+            # 3a. Cerca con il filename originale (es. cookies.txt)
             path_orig = os.path.join('/etc/secrets', filename)
             if os.path.exists(path_orig):
                 found_secret_path = path_orig
 
-            # 2b. Cerca con i nomi delle variabili (es. INSTAGRAM_COOKIES) se non trovato prima
+            # 3b. Cerca con i nomi delle variabili (es. INSTAGRAM_COOKIES) se non trovato prima
             if not found_secret_path and env_var_names:
                 if isinstance(env_var_names, str):
                     check_names = [env_var_names]
@@ -100,13 +107,6 @@ class SocialMediaDownloader:
                     # Se fallisce la copia, ritorniamo l'originale sperando che yt-dlp non debba scriverci
                     return found_secret_path
 
-            # 3. Cerca nella directory corrente (Fallback locale / git)
-            local_path = os.path.join(os.path.dirname(__file__), filename)
-            # Se esiste torniamo questo, ma logghiamo che è un fallback
-            if os.path.exists(local_path):
-                logger.info(f"Uso cookie locale (fallback): {local_path}")
-                return local_path
-            
             logger.warning(f"Cookie {filename} non trovato da nessuna parte.")
             return local_path # Ritorna il percorso locale come default per evitare crash immediati su path null
 
@@ -239,19 +239,23 @@ class SocialMediaDownloader:
                 'Origin': 'https://www.youtube.com',
             })
 
-            # Attempt 0: Android Client (No Cookies) - Molto efficace per Shorts
-            if attempt == 0:
+            # Attempt 0: Web Client Standard + Cookies (se ci sono) - Priorità massima cookies freschi
+            if attempt == 0 and os.path.exists(self.youtube_cookies):
+                opts['cookiefile'] = self.youtube_cookies
+                # opts['extractor_args'] = {'youtube': {'player_client': ['web']}} # default
+            
+            # Attempt 1: Android Client (No Cookies) - Fallback efficace per Shorts
+            elif attempt == 1:
                 opts['extractor_args'] = {'youtube': {'player_client': ['android']}}
             
-            # Attempt 1: iOS Client (No Cookies)
-            elif attempt == 1:
+            # Attempt 2: iOS Client (No Cookies)
+            elif attempt == 2:
                 opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
 
-            # Attempt 2: Web Client Standard + Cookies (se ci sono)
+            # Attempt 3: Web Client Standard + Cookies (retry finale) o fallback senza cookies
             else:
                 if os.path.exists(self.youtube_cookies):
                     opts['cookiefile'] = self.youtube_cookies
-                # else: fallback standard web client
 
         # Facebook
         if 'facebook' in url.lower() or 'fb.' in url.lower():
