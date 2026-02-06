@@ -217,7 +217,7 @@ class SocialMediaDownloader:
             # Strategia semplificata al massimo per evitare errori
             # Usiamo 'best' che lascia decidere a yt-dlp il formato migliore disponibile
             # e poi chiediamo di convertirlo in mp4 se necessario
-            opts['format'] = 'best'
+            opts['format'] = 'bestvideo+bestaudio/best'
             opts['merge_output_format'] = 'mp4'
             
             # Use cookies on all attempts to avoid auth errors
