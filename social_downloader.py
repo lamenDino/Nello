@@ -1419,6 +1419,10 @@ class SocialMediaDownloader:
         cobalt_instances = [
             "https://cobalt.stream",
             "https://cobalt.kep.io",
+            "https://api.cobalt.kwiatekmiki.pl",
+            "https://cobalt.slpy.one",
+            "https://cobalt.root.sx",
+            "https://cobalt.zuu.pl",
             "https://cobalt.7th.ch",
             "https://cobalt.q11.app",
             "https://co.wuk.sh", 
