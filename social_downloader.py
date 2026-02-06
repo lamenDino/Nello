@@ -215,11 +215,14 @@ class SocialMediaDownloader:
             # opts['match_filters'] = ['duration<=600']
             
             # Strategia più robusta per i formati:
-            # 1. Prova prima 'best' (singolo file, spesso MP4 per shorts su mobile/web)
-            # 2. Poi 'bestvideo+bestaudio' (richiede merging)
-            # 3. Rimuovi restrizioni rigide sulle estensioni che causavano errori
-            opts['format'] = 'best/bestvideo+bestaudio'
-            opts['merge_output_format'] = 'mp4'
+            # 1. Prova prima 'best[ext=mp4]' perché Telegram preferisce MP4
+            # 2. Poi 'bestvideo+bestaudio' che forza il merge
+            # 3. Fallback su 'best' generico (potrebbe essere webm/mkv)
+            # Rimuoviamo filtri troppo restrittivi per evitare "Required format not available"
+            opts['format'] = 'best[ext=mp4]/bestvideo+bestaudio/best'
+            
+            # Disabilitiamo il filtro durata che a volte fallisce se i metadati non sono pronti
+            # opts['match_filters'] = ['duration<=600']
 
             # Use cookies on all attempts to avoid auth errors
             # self.youtube_cookies contiene già il path risolto (eventualmente copia in tmp)
