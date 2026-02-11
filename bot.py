@@ -85,10 +85,19 @@ NELLO_ERRORS = [
 # =========================
 
 def is_supported_link(url: str) -> bool:
-    return any(d in url for d in [
+    is_supported = any(d in url for d in [
         "tiktok.com", "instagram.com", "facebook.com",
         "youtube.com", "youtu.be", "twitter.com", "x.com"
     ])
+    
+    if not is_supported:
+        return False
+
+    # Restrict YouTube to Shorts only
+    if "youtube.com" in url or "youtu.be" in url:
+        return "/shorts/" in url
+
+    return True
 
 def detect_platform(url: str) -> str:
     url = url.lower()
@@ -515,12 +524,12 @@ def main():
         chat_id=GROUP_CHAT_ID
     )
 
-    application.job_queue.run_repeating(
-        hourly_funny_routine,
-        interval=3600,
-        first=60,
-        chat_id=GROUP_CHAT_ID
-    )
+    # application.job_queue.run_repeating(
+    #     hourly_funny_routine,
+    #     interval=3600,
+    #     first=60,
+    #     chat_id=GROUP_CHAT_ID
+    # )
 
     if USE_WEBHOOK and WEBHOOK_URL:
         # Run webhook server (python-telegram-bot will bind to PORT)
