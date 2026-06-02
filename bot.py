@@ -147,6 +147,46 @@ def detect_platform(url: str) -> str:
     return "Sconosciuta"
 
 # =========================
+# DIDASCALIA (caption)
+# =========================
+
+# Pool di icone "vivaci" pescate a caso a ogni invio, così la didascalia cambia sempre.
+ICONS_VIDEO = ["🎬", "📹", "🎥", "🍿", "📺", "🎞️", "🕹️", "📀", "🎦"]
+ICONS_FOTO = ["📸", "🖼️", "📷", "🌄", "🏞️", "🎨", "🪄", "🖌️", "🌟"]
+ICONS_USER = ["👤", "🙋", "😎", "🤙", "🫶", "🧑‍💻", "🦸", "🥷", "👑", "🤩"]
+ICONS_LINK = ["🔗", "🌐", "📎", "🧷", "➡️", "🪢", "📡"]
+ICONS_META = ["📝", "💬", "🗒️", "✨", "💭", "📌", "🧠", "🔎"]
+
+VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+
+
+def media_label(info: dict) -> str:
+    """Ritorna 'Video', 'Foto' o 'Contenuto' in base a cosa si sta inviando davvero."""
+    if info.get("type", "video") == "video":
+        return "Video"
+    files = info.get("files", []) or []
+    has_video = any(os.path.splitext(f)[1].lower() in VIDEO_EXTS for f in files)
+    has_photo = any(os.path.splitext(f)[1].lower() not in VIDEO_EXTS for f in files)
+    if has_video and has_photo:
+        return "Contenuto"
+    if has_video:
+        return "Video"
+    return "Foto"
+
+
+def build_caption(info: dict, url: str, sender_name: str, raw_title: str) -> str:
+    """Didascalia adattiva (Foto/Video/Contenuto) con icone casuali e accordo grammaticale."""
+    label = media_label(info)
+    inviato = "inviata" if label == "Foto" else "inviato"
+    icon_main = random.choice(ICONS_FOTO if label == "Foto" else ICONS_VIDEO)
+    return (
+        f"{icon_main} <b>{label} da:</b> {detect_platform(url)}\n"
+        f"{random.choice(ICONS_USER)} <b>{label} {inviato} da:</b> {escape(sender_name)}\n"
+        f"{random.choice(ICONS_LINK)} <b>Link originale:</b> {escape(url)}\n"
+        f"{random.choice(ICONS_META)} <b>Info:</b> {escape(raw_title)}"
+    )
+
+# =========================
 # COMMANDS
 # =========================
 
@@ -291,12 +331,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  if len(raw_title) > 300:
                      raw_title = raw_title[:300] + "..."
 
-            caption = (
-                f"🎵 <b>Video da :</b> {detect_platform(url)}\n"
-                f"👤 <b>Video inviato da :</b> {escape(msg.from_user.full_name)}\n"
-                f"🔗 <b>Link originale :</b> {escape(url)}\n"
-                f"📝 <b>Meta info video :</b> {escape(raw_title)}"
-            )
+            caption = build_caption(info, url, msg.from_user.full_name, raw_title)
 
             # =========================
             # INVIO CONTENUTI
