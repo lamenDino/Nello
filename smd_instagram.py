@@ -45,21 +45,35 @@ class InstagramMixin:
             logger.info(f"Instagram API: shortcode={shortcode} -> media_id={media_id}")
 
             api_url = f"https://www.instagram.com/api/v1/media/{media_id}/info/"
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "X-IG-App-ID": "936619743392459",
-                "Referer": url,
-            }
 
             cookies = self._load_netscape_cookies(self.instagram_cookies)
             if not cookies:
                  logger.warning("Instagram API: cookies missing, cannot use API fallback")
                  return []
 
+            # Header completi come li manda l'app web di Instagram: senza X-CSRFToken
+            # / X-IG-WWW-Claim / X-ASBD-ID l'endpoint risponde spesso 429/403.
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "X-IG-App-ID": "936619743392459",
+                "X-ASBD-ID": "129477",
+                "X-IG-WWW-Claim": "0",
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "*/*",
+                "Referer": url,
+            }
+            csrftoken = cookies.get('csrftoken')
+            if csrftoken:
+                headers["X-CSRFToken"] = csrftoken
+            if not cookies.get('sessionid'):
+                logger.warning("Instagram API: manca 'sessionid' nei cookie -> sessione non loggata (cookie probabilmente scaduti)")
+
             r = requests.get(api_url, headers=headers, cookies=cookies, timeout=15, proxies=self.proxy_dict)
             if r.status_code != 200:
-                logger.warning(f"Instagram API: failed with status {r.status_code}")
+                if r.status_code in (401, 403, 429):
+                    logger.warning(f"Instagram API: status {r.status_code} -> cookie Instagram probabilmente SCADUTI/invalidi. Rigenera INSTAGRAM_COOKIES.")
+                else:
+                    logger.warning(f"Instagram API: failed with status {r.status_code}")
                 return []
 
             data = r.json()
