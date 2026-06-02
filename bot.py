@@ -634,10 +634,79 @@ def start_webserver():
     asyncio.run(run_web())
 
 # =========================
+# DIAGNOSTICA po_token (bgutil)
+# =========================
+
+def potoken_selftest():
+    """All'avvio: verifica che il server bgutil risponda e che yt-dlp usi il po_token."""
+    import time as _t
+    import urllib.request
+
+    # 1) Attendi che il server bgutil sia pronto (max ~15s) e pinga
+    server_ok = False
+    for _ in range(15):
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:4416/ping', timeout=3) as r:
+                body = r.read().decode('utf-8', 'replace')[:200]
+                logger.info(f"[POT] bgutil /ping OK: {body}")
+                server_ok = True
+                break
+        except Exception:
+            _t.sleep(1)
+    if not server_ok:
+        logger.warning("[POT] bgutil /ping NON raggiungibile dopo 15s")
+
+    # 2) Plugin caricato da yt-dlp?
+    try:
+        import yt_dlp_plugins  # noqa: F401
+        logger.info(f"[POT] yt_dlp_plugins presente: {list(getattr(yt_dlp_plugins, '__path__', []))}")
+    except Exception as e:
+        logger.warning(f"[POT] yt_dlp_plugins NON importabile: {e}")
+
+    # 3) Estrazione di prova verbose: cattura le righe relative al po_token
+    try:
+        import yt_dlp
+        captured = []
+
+        class _L:
+            def debug(self, m): captured.append(str(m))
+            def info(self, m): captured.append(str(m))
+            def warning(self, m): captured.append(str(m))
+            def error(self, m): captured.append(str(m))
+
+        ydl_opts = {
+            'quiet': True, 'no_warnings': True, 'skip_download': True,
+            'verbose': True, 'logger': _L(),
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+        }
+        if os.path.exists('/etc/secrets/YOUTUBE_COOKIES'):
+            ydl_opts['cookiefile'] = '/etc/secrets/YOUTUBE_COOKIES'
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info('https://www.youtube.com/watch?v=BaW_jenozKc', download=False)
+                nfmt = len(info.get('formats') or []) if info else 0
+                logger.info(f"[POT] estrazione di prova: {nfmt} formati")
+            except Exception as e:
+                logger.warning(f"[POT] estrazione di prova fallita: {str(e)[:160]}")
+        rel = [m for m in captured if any(k in m.lower() for k in ('pot', 'token', 'bgutil', 'provider'))]
+        for m in rel[:20]:
+            logger.info(f"[POT] {m[:220]}")
+        if not rel:
+            logger.info("[POT] nessuna riga 'po_token/bgutil' nei log verbose (plugin non invocato)")
+    except Exception as e:
+        logger.warning(f"[POT] selftest fallito: {e}")
+
+# =========================
 # MAIN
 # =========================
 
 def main():
+    if os.getenv('POT_SELFTEST', '1') == '1':
+        try:
+            potoken_selftest()
+        except Exception as e:
+            logger.warning(f"potoken_selftest error: {e}")
+
     # Webhook mode (useful on Render) controlled by USE_WEBHOOK and WEBHOOK_URL
     USE_WEBHOOK = os.getenv('USE_WEBHOOK', '0') == '1'
     WEBHOOK_URL = os.getenv('WEBHOOK_URL')
