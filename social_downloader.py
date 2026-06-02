@@ -247,26 +247,28 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 'Origin': 'https://www.youtube.com',
             })
 
-            # IMPORTANTE: dal 2025/2026 YouTube rifiuta i client 'web' e 'ios' senza
-            # po_token (ritornano solo formati DRM/storyboard -> "Requested format is
-            # not available"). Il client 'android' e' l'unico affidabile per gli Shorts.
-            # Quindi proviamo android per primo e passiamo piu' client in un colpo solo.
+            # IMPORTANTE (stato 2026): su IP datacenter YouTube chiede o l'autenticazione
+            # (cookie) o un po_token. Con i cookie il client 'web' passa il controllo bot
+            # ma restituisce solo formati DRM/storyboard ("Requested format is not
+            # available"). I client 'tv'/'web_safari'/'mweb' invece, CON i cookie,
+            # restituiscono formati reali senza bisogno del po_token.
+            has_yt_cookies = os.path.exists(self.youtube_cookies)
 
-            # Attempt 0: Android (+ iOS/web come ripiego) + cookies se presenti
+            # Attempt 0: cookies + client che danno formati senza po_token
             if attempt == 0:
-                opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios', 'web']}}
-                if os.path.exists(self.youtube_cookies):
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'web_safari', 'mweb']}}
+                if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
-            # Attempt 1: Android/TV senza cookies (nel caso siano scaduti o flaggati)
+            # Attempt 1: cookies + altri client autenticati
             elif attempt == 1:
-                opts['extractor_args'] = {'youtube': {'player_client': ['android', 'tv']}}
-
-            # Attempt 2+: ulteriori client + cookies come ultima risorsa
-            else:
-                opts['extractor_args'] = {'youtube': {'player_client': ['ios', 'mweb', 'web']}}
-                if os.path.exists(self.youtube_cookies):
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv_embedded', 'web_creator', 'web']}}
+                if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
+
+            # Attempt 2: senza cookies (utile solo se l'IP non e' flaggato, es. residenziale)
+            else:
+                opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios', 'tv']}}
 
         # Facebook
         if 'facebook' in url.lower() or 'fb.' in url.lower():
