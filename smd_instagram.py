@@ -272,49 +272,73 @@ class InstagramMixin:
                     out.append(x)
             return out
 
-        def _collect_urls(obj, urls_out: List[str]):
+        urls: List[str] = []
+        seen_ids = set()
+
+        def _add_media_image(node):
+            """Aggiunge la miglior risoluzione di un media (slide), deduplicando per pk/id."""
+            if not isinstance(node, dict):
+                return
+            # Salta i video: questo fallback gestisce solo le foto
+            if node.get('video_versions'):
+                return
+            iv = node.get('image_versions2')
+            cands = iv.get('candidates') if isinstance(iv, dict) else None
+            if cands and isinstance(cands, list) and isinstance(cands[0], dict) and cands[0].get('url'):
+                pk = node.get('pk') or node.get('id') or cands[0]['url']
+                if pk not in seen_ids:
+                    seen_ids.add(pk)
+                    urls.append(cands[0]['url'])
+
+        def _walk(obj):
             if isinstance(obj, dict):
+                cm = obj.get('carousel_media')
+                if isinstance(cm, list) and cm:
+                    for m in cm:
+                        _add_media_image(m)
+                elif 'image_versions2' in obj:
+                    _add_media_image(obj)
                 for v in obj.values():
-                    _collect_urls(v, urls_out)
+                    _walk(v)
             elif isinstance(obj, list):
                 for v in obj:
-                    _collect_urls(v, urls_out)
-            elif isinstance(obj, str):
-                if ('cdninstagram' in obj or 'fbcdn' in obj) and any(ext in obj for ext in ('.jpg', '.jpeg', '.png', '.webp')):
-                    urls_out.append(obj)
+                    _walk(v)
 
-        urls: List[str] = []
-
-        # 0) Always extract Meta og:image / twitter:image FIRST (Most reliable for single posts)
-        meta_patterns = [
-            re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-            re.compile(r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-            re.compile(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
-        ]
-        for mp in meta_patterns:
-            urls.extend(mp.findall(html))
-
-        # 1) window._sharedData
-        shared_match = re.search(r'window\._sharedData\s*=\s*(\{.*?\})\s*;\s*</script>', html, re.DOTALL)
-        if shared_match:
+        # 1) Struttura MODERNA: JSON embedded (image_versions2/carousel_media), come l'API
+        #    ma senza chiamarla (evita il 429). Gli URL qui dentro sono spesso escapati.
+        for blob in re.findall(r'<script[^>]+type="application/json"[^>]*>(.*?)</script>', html, re.DOTALL):
             try:
-                data = json.loads(shared_match.group(1))
-                _collect_urls(data, urls)
+                _walk(json.loads(blob))
             except Exception:
-                pass
+                continue
 
-        # 2) __additionalDataLoaded
-        add_match = re.search(r'__additionalDataLoaded\([^,]+,\s*(\{.*?\})\s*\);', html, re.DOTALL)
-        if add_match:
-            try:
-                data = json.loads(add_match.group(1))
-                _collect_urls(data, urls)
-            except Exception:
-                pass
+        # 2) Legacy: window._sharedData / __additionalDataLoaded (vecchi post)
+        for pat in (
+            r'window\._sharedData\s*=\s*(\{.*?\})\s*;\s*</script>',
+            r'__additionalDataLoaded\([^,]+,\s*(\{.*?\})\s*\);',
+        ):
+            m = re.search(pat, html, re.DOTALL)
+            if m:
+                try:
+                    _walk(json.loads(m.group(1)))
+                except Exception:
+                    pass
 
-        # 3) Regex generico
-        pattern = re.compile(r'https?://[^"\'>\s]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s]*)?', re.IGNORECASE)
-        urls.extend([u for u in pattern.findall(html) if 'cdninstagram' in u or 'fbcdn' in u])
+        # 3) Ultima risorsa: de-escapa l'HTML (\/ -> /, & -> &) e cerca URL immagine.
+        #    Senza il de-escape gli URL del contenuto (escapati nel JSON) NON venivano trovati:
+        #    era il motivo per cui restavano solo gli asset statici della pagina.
+        if not urls:
+            unescaped = html.replace('\\u0026', '&').replace('\\/', '/')
+            meta_patterns = [
+                re.compile(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+                re.compile(r'<meta[^>]+name=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+                re.compile(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE),
+            ]
+            for mp in meta_patterns:
+                urls.extend(mp.findall(unescaped))
+            # Niente backslash nel match: evita di ricatturare frammenti ancora escapati
+            pattern = re.compile(r'https?://[^"\'>\s\\]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'>\s\\]*)?', re.IGNORECASE)
+            urls.extend(u for u in pattern.findall(unescaped) if 'cdninstagram' in u or 'fbcdn' in u)
 
         return _dedupe(urls)
 
