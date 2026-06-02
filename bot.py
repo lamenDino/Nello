@@ -663,10 +663,11 @@ def potoken_selftest():
     except Exception as e:
         logger.warning(f"[POT] yt_dlp_plugins NON importabile: {e}")
 
-    # 3) Estrazione di prova verbose: cattura le righe relative al po_token
+    # 3) Estrazione di prova verbose: cattura le righe relative a plugin / po_token
+    captured = []
     try:
+        import shutil
         import yt_dlp
-        captured = []
 
         class _L:
             def debug(self, m): captured.append(str(m))
@@ -674,27 +675,42 @@ def potoken_selftest():
             def warning(self, m): captured.append(str(m))
             def error(self, m): captured.append(str(m))
 
+        # Copia i cookie in posizione scrivibile (/etc/secrets e' read-only)
+        cookie_copy = None
+        try:
+            if os.path.exists('/etc/secrets/YOUTUBE_COOKIES'):
+                cookie_copy = '/tmp/yt_selftest_cookies.txt'
+                shutil.copyfile('/etc/secrets/YOUTUBE_COOKIES', cookie_copy)
+        except Exception as e:
+            logger.warning(f"[POT] copia cookie fallita: {e}")
+            cookie_copy = None
+
         ydl_opts = {
             'quiet': True, 'no_warnings': True, 'skip_download': True,
             'verbose': True, 'logger': _L(),
-            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'extractor_args': {'youtube': {'player_client': ['web', 'mweb']}},
         }
-        if os.path.exists('/etc/secrets/YOUTUBE_COOKIES'):
-            ydl_opts['cookiefile'] = '/etc/secrets/YOUTUBE_COOKIES'
+        if cookie_copy:
+            ydl_opts['cookiefile'] = cookie_copy
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
-                info = ydl.extract_info('https://www.youtube.com/watch?v=BaW_jenozKc', download=False)
+                info = ydl.extract_info('https://www.youtube.com/watch?v=dQw4w9WgXcQ', download=False)
                 nfmt = len(info.get('formats') or []) if info else 0
-                logger.info(f"[POT] estrazione di prova: {nfmt} formati")
+                logger.info(f"[POT] estrazione di prova: {nfmt} formati trovati")
             except Exception as e:
                 logger.warning(f"[POT] estrazione di prova fallita: {str(e)[:160]}")
-        rel = [m for m in captured if any(k in m.lower() for k in ('pot', 'token', 'bgutil', 'provider'))]
-        for m in rel[:20]:
-            logger.info(f"[POT] {m[:220]}")
-        if not rel:
-            logger.info("[POT] nessuna riga 'po_token/bgutil' nei log verbose (plugin non invocato)")
     except Exception as e:
         logger.warning(f"[POT] selftest fallito: {e}")
+    finally:
+        # Stampa le righe rilevanti dei log verbose (anche se l'estrazione e' fallita)
+        kws = ('pot token', 'po_token', 'potoken', 'bgutil', 'pot provider', 'gvs',
+               'plugin', 'fetching', 'visitor', 'player', 'sign in', 'format')
+        rel = [m for m in captured if any(k in m.lower() for k in kws)]
+        for m in rel[:30]:
+            logger.info(f"[POT] {m[:220]}")
+        if not rel:
+            logger.info("[POT] nessuna riga rilevante nei log verbose")
 
 # =========================
 # MAIN
