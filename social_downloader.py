@@ -254,19 +254,23 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             # restituiscono formati reali senza bisogno del po_token.
             has_yt_cookies = os.path.exists(self.youtube_cookies)
 
-            # Attempt 0: cookies + client che danno formati senza po_token
+            # Con il provider po_token (bgutil) attivo, i client 'web'/'mweb' ottengono
+            # i formati anche su IP datacenter. Il plugin yt-dlp recupera il po_token
+            # in automatico dal server locale (porta 4416).
+
+            # Attempt 0: web/mweb + cookies + po_token (combinazione vincente sul server)
             if attempt == 0:
+                opts['extractor_args'] = {'youtube': {'player_client': ['web', 'mweb', 'tv']}}
+                if has_yt_cookies:
+                    opts['cookiefile'] = self.youtube_cookies
+
+            # Attempt 1: altri client autenticati (ripiego se po_token non disponibile)
+            elif attempt == 1:
                 opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'web_safari', 'mweb']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
-            # Attempt 1: cookies + altri client autenticati
-            elif attempt == 1:
-                opts['extractor_args'] = {'youtube': {'player_client': ['tv_embedded', 'web_creator', 'web']}}
-                if has_yt_cookies:
-                    opts['cookiefile'] = self.youtube_cookies
-
-            # Attempt 2: senza cookies (utile solo se l'IP non e' flaggato, es. residenziale)
+            # Attempt 2: android/ios senza cookies (utile se l'IP non e' flaggato)
             else:
                 opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios', 'tv']}}
 
