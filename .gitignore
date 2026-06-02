@@ -16,3 +16,18 @@ htmlcov/
 *.log
 bot.log
 .venv/
+
+# Segreti: cookie di sessione e token (usa i Render Secret Files / env vars)
+*_cookies.txt
+cookies.txt
+firebase_credentials.json
+*serviceAccount*.json
+
+# Artefatti generati a runtime
+ranking_data.json
+tiktok_dump.html
+tiktok_json_dump_*.json
+smd_debug/
+
+# Editor workspace
+*.code-workspace

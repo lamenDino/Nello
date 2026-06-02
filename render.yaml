@@ -12,3 +12,8 @@ services:
         value: INFO
       - key: TEMP_DIR
         value: /tmp
+      # Credenziali Firebase: incolla qui il JSON del service account (sync: false
+      # = lo imposti dalla dashboard, non viene committato nel repo).
+      # In alternativa carica un Secret File in /etc/secrets/firebase_credentials.json
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false

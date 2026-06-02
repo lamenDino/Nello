@@ -14,7 +14,6 @@ import asyncio
 import random
 import pytz
 from datetime import time, datetime
-from collections import defaultdict
 
 from aiohttp import web
 from telegram import Update
@@ -31,6 +30,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from social_downloader import SocialMediaDownloader
+from ranking_store import get_ranking_store
 
 load_dotenv()
 
@@ -38,6 +38,9 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PORT = int(os.getenv("PORT", "8080"))
 
 GROUP_CHAT_ID = int(os.getenv('CHAT_ID') or os.getenv('GROUP_CHAT_ID') or '214193849')
+
+# Limite di upload della Bot API di Telegram (50MB per i bot standard)
+TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -49,7 +52,10 @@ logger = logging.getLogger(__name__)
 # RANKING
 # =========================
 
-video_ranking = defaultdict(int)
+# Storage del ranking: Firebase Firestore se configurato, altrimenti file JSON locale.
+# Il path JSON e' usato solo come fallback (vedi ranking_store.py).
+_RANKING_JSON_FALLBACK = os.getenv('RANKING_FILE', os.path.join(os.path.dirname(__file__), 'ranking_data.json'))
+ranking_store = get_ranking_store(_RANKING_JSON_FALLBACK)
 
 BADGES = ["🥇", "🥈", "🥉"]
 
@@ -58,7 +64,20 @@ AFORISMI = [
     "Chi fa ogni giorno qualcosa, arriva sempre lontano.",
     "Il successo è la somma di piccoli sforzi ripetuti.",
     "Non esistono scorciatoie che valgano più del percorso.",
-    "La disciplina oggi è la libertà di domani."
+    "La disciplina oggi è la libertà di domani.",
+    "Cadi sette volte, rialzati otto.",
+    "Il momento migliore per iniziare era ieri. Il secondo migliore è adesso.",
+    "Le grandi imprese nascono da piccoli passi quotidiani.",
+    "Non contare i giorni, fai in modo che i giorni contino.",
+    "La fatica di oggi è la forza di domani.",
+    "Chi smette di migliorare ha smesso di essere bravo.",
+    "I sogni non funzionano se non lavori anche tu.",
+    "Un po' ogni giorno batte tanto una volta sola.",
+    "La motivazione ti fa partire, l'abitudine ti fa continuare.",
+    "Non aspettare l'occasione perfetta: creala.",
+    "Il talento apre la porta, la costanza la tiene aperta.",
+    "Ogni esperto è stato prima un principiante testardo.",
+    "Vinci la pigrizia una scelta alla volta."
 ]
 
 FUNNY_SOURCES = [
@@ -83,6 +102,18 @@ NELLO_ERRORS = [
 # =========================
 # UTILS
 # =========================
+
+# Downloader condiviso (istanziato una sola volta: evita di ricreare l'oggetto
+# e di rilanciare il log della versione yt-dlp ad ogni messaggio)
+_downloader = None
+
+
+def get_downloader() -> SocialMediaDownloader:
+    global _downloader
+    if _downloader is None:
+        _downloader = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
+    return _downloader
+
 
 def is_supported_link(url: str) -> bool:
     is_supported = any(d in url for d in [
@@ -123,6 +154,35 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Received /start in chat {update.effective_chat.id} from {update.effective_user.id}")
     await update.message.reply_text(f"Ciao! Il Chat ID di questo gruppo è: <code>{update.effective_chat.id}</code>\nMandami un link video e penso io a tutto 🔥", parse_mode=ParseMode.HTML)
 
+
+async def resolve_user_name(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+    """Risolve il nome pubblico di un utente dal suo id (best effort)."""
+    try:
+        chat = await context.bot.get_chat(user_id)
+        return chat.full_name or getattr(chat, 'first_name', None) or 'Utente'
+    except Exception:
+        return 'Utente'
+
+
+async def classifica_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra la classifica corrente (live) senza azzerarla."""
+    data = await ranking_store.get_all()
+    if not data:
+        await update.message.reply_text(
+            "📭 Nessun video in classifica questa settimana. Mandane uno! 🐶"
+        )
+        return
+
+    sorted_users = sorted(data.items(), key=lambda x: x[1], reverse=True)
+
+    text = "🏆 <b>CLASSIFICA ATTUALE</b>\n\n"
+    for i, (user_id, count) in enumerate(sorted_users[:10]):
+        badge = BADGES[i] if i < len(BADGES) else f"<b>{i + 1}.</b>"
+        name = await resolve_user_name(context, user_id)
+        text += f"{badge} {escape(name)} — <b>{count}</b> video\n"
+
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
 # =========================
 # DOWNLOAD HANDLER
 # =========================
@@ -140,9 +200,9 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Received message from {update.effective_user.id} with {len(valid_urls)} valid links")
 
-    # Inizializza downloader una volta sola per efficienza
-    dl = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
-    
+    # Downloader condiviso (singleton)
+    dl = get_downloader()
+
     # Per evitare spam di errori, cancelliamo messaggio originale su primo successo
     original_message_deleted = False
 
@@ -177,16 +237,48 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 continue
 
-            # Se successo, cancella il messaggio originale (solo la prima volta)
-            if not original_message_deleted:
+            # Controllo dimensione: la Bot API di Telegram rifiuta gli upload > 50MB.
+            # Meglio un messaggio chiaro che un errore criptico durante l'invio.
+            if info.get("type", "video") == "video":
+                candidate_paths = [info.get("file_path")]
+            else:
+                candidate_paths = info.get("files", []) or []
+
+            oversized = next(
+                (p for p in candidate_paths
+                 if p and os.path.exists(p) and os.path.getsize(p) > TELEGRAM_MAX_BYTES),
+                None
+            )
+            if oversized:
+                size_mb = os.path.getsize(oversized) / (1024 * 1024)
                 try:
-                    await msg.delete()
-                    original_message_deleted = True
+                    await context.bot.send_message(
+                        chat_id=msg.chat_id,
+                        text=(
+                            f"🐘 <b>Troppo pesante per Nello!</b>\n\n"
+                            f"Il file ({size_mb:.0f}MB) supera il limite di 50MB di Telegram "
+                            f"per i bot, non posso inviarlo.\n(Link: {escape(url)})"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
                 except Exception:
                     pass
+                for p in candidate_paths:
+                    try:
+                        if p and os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                try:
+                    await loading.delete()
+                except Exception:
+                    pass
+                continue
 
-            # incrementa ranking (1 contenuto = 1 punto, sia video che carosello)
-            video_ranking[msg.from_user.id] += 1
+            # Il punto in classifica viene assegnato SOLO dopo un invio riuscito
+            # (vedi sotto): così contiamo i video realmente consegnati nel gruppo,
+            # non quelli scaricati ma poi falliti in fase di invio.
+            sent_ok = False
 
             # Truncate title to 3 lines max
             raw_title = info.get('title', 'N/A')
@@ -219,6 +311,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         caption=caption,
                         parse_mode=ParseMode.HTML
                     )
+                sent_ok = True
                 try:
                     os.remove(info["file_path"])
                 except Exception:
@@ -253,6 +346,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     caption=caption,
                                     parse_mode=ParseMode.HTML
                                 )
+                        sent_ok = True
                     except Exception as e:
                         err_str = str(e).lower()
                         if 'caption' in err_str and 'too long' in err_str:
@@ -264,6 +358,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         await context.bot.send_video(chat_id=msg.chat_id, video=f, caption=short_caption, parse_mode=ParseMode.HTML)
                                     else:
                                         await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                                 sent_ok = True
                              except Exception as inner_e:
                                  logger.error(f"Error sending single item matching caption retry: {inner_e}")
                                  await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (errore imprevisto).")
@@ -318,6 +413,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     chat_id=msg.chat_id,
                                     media=media
                                 )
+                                sent_ok = True
                             except Exception as e:
                                # Handle "caption too long" specifically
                                err_str = str(e).lower()
@@ -331,6 +427,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                 chat_id=msg.chat_id,
                                                 media=media
                                            )
+                                           sent_ok = True
                                        except Exception as inner_e:
                                            logger.error(f"Failed retry sending media group: {inner_e}")
                                            await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (didascalia troppo lunga).")
@@ -349,6 +446,20 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     os.remove(photo_path)
                                 except Exception:
                                     pass
+
+            # Punto in classifica + rimozione del messaggio originale SOLO se abbiamo
+            # davvero consegnato il contenuto nel gruppo (1 contenuto = 1 punto).
+            if sent_ok:
+                try:
+                    await ranking_store.add_point(msg.from_user.id)
+                except Exception as e:
+                    logger.warning(f"Ranking: add_point fallito per {msg.from_user.id}: {e}")
+                if not original_message_deleted:
+                    try:
+                        await msg.delete()
+                        original_message_deleted = True
+                    except Exception:
+                        pass
 
             await loading.delete() # Cancella "Download in corso" per questo link
 
@@ -382,8 +493,8 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
     # Log chat destination
     logger.info(f"Hourly Funny Job: Sending to GROUP_CHAT_ID={GROUP_CHAT_ID}")
 
-    dl = SocialMediaDownloader()
-    
+    dl = get_downloader()
+
     # Try up to 3 sources before giving up
     for _ in range(3):
         source = random.choice(FUNNY_SOURCES)
@@ -391,77 +502,74 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
             # Get random video url
             video_url = await dl.get_random_video_url(source)
             if not video_url:
-                continue 
-                
+                continue
+
             # Download
             info = await dl.download_video(video_url)
-            
+
             if info.get("success") and info.get("type") == "video":
-             # Send video ONLY (no poll)
-             caption = (
-                 f"🐱 <b>Gattini Divertenti!</b>\n"
-                 f"👤 <b>Fonte:</b> <a href='{source}'>TikTok</a>\n"
-             )
-             
-             with open(info['file_path'], 'rb') as f:
-                 await context.bot.send_video(
-                    chat_id=GROUP_CHAT_ID,
-                    video=f,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
-                 )
-             
-             try:
-                 os.remove(info['file_path'])
-             except:
-                 pass
-             
-             # Break loop on success
-             break
-             
+                # Send video ONLY (no poll)
+                caption = (
+                    f"🐱 <b>Gattini Divertenti!</b>\n"
+                    f"👤 <b>Fonte:</b> <a href='{source}'>TikTok</a>\n"
+                )
+
+                with open(info['file_path'], 'rb') as f:
+                    await context.bot.send_video(
+                        chat_id=GROUP_CHAT_ID,
+                        video=f,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    )
+
+                try:
+                    os.remove(info['file_path'])
+                except Exception:
+                    pass
+
+                # Break loop on success
+                break
+
         except Exception as e:
             logger.error(f"Funny video loop error on source {source}: {e}")
             continue
-        logger.error(f"Hourly video job failed: {e}")
 
 # =========================
 # WEEKLY RANKING JOB
 # =========================
 
 async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
-    if not video_ranking:
+    data = await ranking_store.get_all()
+    if not data:
         return
 
     # Usa il chat_id del job se presente (così invia solo al gruppo configurato)
     chat_id = getattr(getattr(context, 'job', None), 'chat_id', None) or GROUP_CHAT_ID
 
     sorted_users = sorted(
-        video_ranking.items(),
+        data.items(),
         key=lambda x: x[1],
         reverse=True
     )
 
     aforisma = random.choice(AFORISMI)
+    celebra = random.choice(["🎉", "🥳", "🎊", "🏅", "✨", "🔥", "👏", "🎈"])
 
-    text = "🏆 <b>RANKING SETTIMANALE</b>\n\n"
+    text = f"{celebra} <b>RANKING SETTIMANALE</b> {celebra}\n\n"
 
     # Mostra sempre i primi 3 posti (se mancano, mostra segnaposto)
     for i in range(3):
         badge = BADGES[i] if i < len(BADGES) else '•'
         if i < len(sorted_users):
             user_id, count = sorted_users[i]
-            # Prova a risolvere il nome pubblico dell'utente
-            try:
-                chat = await context.bot.get_chat(user_id)
-                name = chat.full_name or getattr(chat, 'first_name', None) or 'Utente'
-            except Exception:
-                name = 'Utente'
-
-            text += f"{badge} [{escape(name)}] — <b>{count}</b> video\n"
+            name = await resolve_user_name(context, user_id)
+            # Menzione cliccabile: notifica il vincitore (funziona anche senza username)
+            mention = f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
+            text += f"{badge} {mention} — <b>{count}</b> video\n"
         else:
-            text += f"{badge} [—] — <b>0</b> video\n"
+            text += f"{badge} — <b>0</b> video\n"
 
-    text += f"\n📜 [{escape(aforisma)}]"
+    text += f"\n📜 <i>{escape(aforisma)}</i>"
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -469,7 +577,7 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-    video_ranking.clear()
+    await ranking_store.reset()
 
 # =========================
 # WEB SERVER (RENDER)
@@ -513,6 +621,7 @@ def main():
     print("Application built.")
 
     application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("classifica", classifica_cmd))
     # Log all text messages first to verify visibility
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
     print("Handlers added.")
