@@ -718,7 +718,9 @@ def potoken_selftest():
 # =========================
 
 def main():
-    if os.getenv('POT_SELFTEST', '1') == '1':
+    # Diagnostica po_token disattivata di default (aggiunge ~20s allo startup).
+    # Riattivabile impostando POT_SELFTEST=1 su Render quando serve indagare.
+    if os.getenv('POT_SELFTEST', '0') == '1':
         try:
             potoken_selftest()
         except Exception as e:
