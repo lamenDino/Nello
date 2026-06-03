@@ -83,6 +83,12 @@ class RankingStore:
     async def set_cached(self, key: str, payload: Dict) -> None:
         raise NotImplementedError
 
+    async def record_chat(self, chat_id: int, title: str) -> None:
+        raise NotImplementedError
+
+    async def get_chats(self) -> List[Dict]:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Logica condivisa (pura) riutilizzata dai due backend
@@ -223,6 +229,20 @@ class JsonRankingStore(RankingStore):
         self.data['filecache'] = _prune(self.data['filecache'], CACHE_MAX, CACHE_TTL)
         await asyncio.to_thread(self._save)
 
+    async def record_chat(self, chat_id, title):
+        self.data.setdefault('chats', {})
+        c = self.data['chats'].setdefault(str(chat_id), {'count': 0})
+        c['title'] = title or c.get('title', '')
+        c['count'] = int(c.get('count', 0)) + 1
+        c['last'] = time.time()
+        await asyncio.to_thread(self._save)
+
+    async def get_chats(self):
+        chats = self.data.get('chats', {}) or {}
+        out = [{'id': k, **v} for k, v in chats.items()]
+        out.sort(key=lambda x: x.get('count', 0), reverse=True)
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Backend: Firebase Firestore
@@ -306,6 +326,24 @@ class FirestoreRankingStore(RankingStore):
             cache = _prune(cache, CACHE_MAX, CACHE_TTL)
             self._cache.set(cache)
         await asyncio.to_thread(_op)
+
+    async def record_chat(self, chat_id, title):
+        def _op():
+            data = self._read()
+            data.setdefault('chats', {})
+            c = data['chats'].setdefault(str(chat_id), {'count': 0})
+            c['title'] = title or c.get('title', '')
+            c['count'] = int(c.get('count', 0)) + 1
+            c['last'] = time.time()
+            self._doc.set({'chats': data['chats']}, merge=True)
+        await asyncio.to_thread(_op)
+
+    async def get_chats(self):
+        data = await asyncio.to_thread(self._read)
+        chats = data.get('chats', {}) or {}
+        out = [{'id': k, **v} for k, v in chats.items()]
+        out.sort(key=lambda x: x.get('count', 0), reverse=True)
+        return out
 
 
 # ---------------------------------------------------------------------------

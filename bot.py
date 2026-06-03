@@ -21,10 +21,12 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.helpers import escape
 from telegram import InputMediaPhoto, InputMediaVideo
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -42,6 +44,18 @@ GROUP_CHAT_ID = int(os.getenv('CHAT_ID') or os.getenv('GROUP_CHAT_ID') or '21419
 
 # Admin a cui mandare gli avvisi (es. cookie scaduti). Default: GROUP_CHAT_ID.
 ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID') or '0') or GROUP_CHAT_ID
+
+# Credenziali Render (opzionali): abilitano /setcookies persistente e l'auto-redeploy
+RENDER_API_KEY = os.getenv('RENDER_API_KEY')
+RENDER_SERVICE_ID = os.getenv('RENDER_SERVICE_ID')
+
+# Mappa piattaforma -> (attributo cookie del downloader, nome secret file su Render)
+COOKIE_TARGETS = {
+    'youtube': ('youtube_cookies', 'YOUTUBE_COOKIES'),
+    'instagram': ('instagram_cookies', 'INSTAGRAM_COOKIES'),
+    'tiktok': ('tiktok_cookies', 'TIKTOK_COOKIES'),
+    'facebook': ('facebook_cookies', 'FACEBOOK_COOKIES'),
+}
 
 # Limite di upload della Bot API di Telegram (50MB per i bot standard)
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
@@ -290,7 +304,8 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
         kind = cached.get('kind')
         if kind == 'video':
             await context.bot.send_video(chat_id=msg.chat_id, video=cached['fid'],
-                                         caption=caption, parse_mode=ParseMode.HTML)
+                                         caption=caption, parse_mode=ParseMode.HTML,
+                                         reply_markup=video_buttons(url, msg.from_user.id))
         elif kind in ('photo', 'animation', 'document'):
             send = {'photo': context.bot.send_photo, 'animation': context.bot.send_animation,
                     'document': context.bot.send_document}[kind]
@@ -315,6 +330,88 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     except Exception as e:
         logger.warning(f"Resend da cache fallito ({url}): {e}")
         return False
+
+
+# =========================
+# BOTTONI INLINE (Audio / Elimina)
+# =========================
+
+# Mappa token->url per i callback (callback_data ha un limite di 64 byte, non ci
+# sta un URL). In memoria, capped; se il bot riparte i vecchi bottoni scadono.
+_cb_links = {}
+_cb_counter = [0]
+
+
+def register_cb_url(url: str) -> str:
+    _cb_counter[0] = (_cb_counter[0] + 1) % 1_000_000
+    token = str(_cb_counter[0])
+    _cb_links[token] = url
+    if len(_cb_links) > 2000:  # prune semplice
+        for k in list(_cb_links.keys())[:1000]:
+            _cb_links.pop(k, None)
+    return token
+
+
+def video_buttons(url: str, owner_id: int) -> InlineKeyboardMarkup:
+    token = register_cb_url(url)
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎵 Audio", callback_data=f"a:{token}"),
+        InlineKeyboardButton("🗑️", callback_data=f"d:{owner_id}"),
+    ]])
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data or ""
+
+    if data.startswith("d:"):
+        try:
+            owner = int(data[2:])
+        except ValueError:
+            owner = 0
+        if q.from_user.id == owner or q.from_user.id == ADMIN_USER_ID:
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            await q.answer("Eliminato 🗑️")
+        else:
+            await q.answer("Solo chi l'ha postato (o l'admin) può eliminarlo.", show_alert=True)
+        return
+
+    if data.startswith("a:"):
+        url = _cb_links.get(data[2:])
+        if not url:
+            await q.answer("Bottone scaduto, rimanda il link 🙏", show_alert=True)
+            return
+        await q.answer("🎵 Estraggo l'audio, un attimo...")
+        loading = await context.bot.send_message(q.message.chat_id, "🎵 Estraggo l'audio...")
+        try:
+            info = await get_downloader().download_audio(url)
+            if info and info.get("success"):
+                path = info["file_path"]
+                if os.path.getsize(path) > TELEGRAM_MAX_BYTES:
+                    await context.bot.send_message(q.message.chat_id, "🐘 Audio troppo grande per Telegram (>50MB).")
+                else:
+                    with open(path, "rb") as f:
+                        await context.bot.send_audio(
+                            chat_id=q.message.chat_id, audio=f,
+                            title=info.get("title"), performer=info.get("uploader"),
+                        )
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            else:
+                await context.bot.send_message(q.message.chat_id, "⚠️ Non riesco a estrarre l'audio da questo link.")
+        except Exception as e:
+            logger.warning(f"Callback audio error: {e}")
+            await context.bot.send_message(q.message.chat_id, "⚠️ Errore nell'estrazione audio.")
+        finally:
+            try:
+                await loading.delete()
+            except Exception:
+                pass
 
 
 # =========================
@@ -483,6 +580,132 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+
+# =========================
+# ADMIN: Render API + cookie via DM + /chats
+# =========================
+
+def _render_request(method: str, path: str, body: dict = None):
+    """Chiamata all'API di Render (richiede RENDER_API_KEY)."""
+    import requests
+    headers = {"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json"}
+    url = f"https://api.render.com/v1{path}"
+    return requests.request(method, url, headers=headers, json=body, timeout=20)
+
+
+def render_update_secret(secret_name: str, content: str) -> bool:
+    try:
+        r = _render_request("PUT", f"/services/{RENDER_SERVICE_ID}/secret-files/{secret_name}",
+                            {"content": content})
+        return r.status_code in (200, 201)
+    except Exception as e:
+        logger.warning(f"Render secret update fallito: {e}")
+        return False
+
+
+def render_trigger_deploy() -> bool:
+    try:
+        r = _render_request("POST", f"/services/{RENDER_SERVICE_ID}/deploys", {})
+        return r.status_code in (200, 201)
+    except Exception as e:
+        logger.warning(f"Render deploy trigger fallito: {e}")
+        return False
+
+
+def _valid_netscape(content: str) -> bool:
+    for line in content.splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and len(line.split('\t')) >= 7:
+            return True
+    return False
+
+
+# Stato: admin -> piattaforma in attesa del file cookie
+_pending_cookies = {}
+
+
+async def setcookies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: aggiorna i cookie di una piattaforma inviando il file in DM."""
+    u = update.effective_user
+    if u.id != ADMIN_USER_ID:
+        await update.message.reply_text("🔒 Solo l'admin può usare questo comando.")
+        return
+    args = context.args or []
+    plat = args[0].lower() if args else ''
+    if plat not in COOKIE_TARGETS:
+        await update.message.reply_text(
+            "Uso: /setcookies <piattaforma>\n"
+            "Piattaforme: youtube, instagram, tiktok, facebook\n"
+            "Poi mandami QUI in privato il file .txt dei cookie."
+        )
+        return
+    _pending_cookies[u.id] = plat
+    await update.message.reply_text(
+        f"📥 Ok, ora mandami il file <b>.txt</b> dei cookie per <b>{plat}</b> (formato Netscape).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Riceve il file cookie dall'admin dopo /setcookies."""
+    u = update.effective_user
+    if not u or u.id != ADMIN_USER_ID or u.id not in _pending_cookies:
+        return
+    plat = _pending_cookies.pop(u.id)
+    attr, secret_name = COOKIE_TARGETS[plat]
+    try:
+        doc = update.message.document
+        f = await context.bot.get_file(doc.file_id)
+        content = (await f.download_as_bytearray()).decode('utf-8', 'replace')
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Non riesco a leggere il file: {e}")
+        return
+
+    if not _valid_netscape(content):
+        await update.message.reply_text("⚠️ Non sembra un file cookie Netscape valido (righe con 7 campi separati da TAB).")
+        return
+
+    # 1) Effetto immediato: sovrascrive il file cookie usato dal downloader
+    immediate = False
+    try:
+        path = getattr(get_downloader(), attr, None)
+        if path:
+            with open(path, 'w', encoding='utf-8', newline='\n') as fh:
+                fh.write(content)
+            immediate = True
+    except Exception as e:
+        logger.warning(f"Scrittura cookie live fallita: {e}")
+
+    # 2) Persistenza: aggiorna il secret file su Render (se configurato)
+    persisted = False
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        persisted = await asyncio.to_thread(render_update_secret, secret_name, content)
+
+    msg = f"✅ Cookie <b>{plat}</b> aggiornati."
+    msg += "\n• Effetto immediato: " + ("sì 🎯" if immediate else "no")
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        msg += "\n• Salvati su Render (persistenti): " + ("sì 💾" if persisted else "no ⚠️")
+    else:
+        msg += "\n• Persistenza su Render: non configurata (imposta RENDER_API_KEY e RENDER_SERVICE_ID per renderli permanenti)."
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+async def chats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: mostra in quali chat è usato il bot."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("🔒 Solo l'admin può usare questo comando.")
+        return
+    chats = await ranking_store.get_chats()
+    if not chats:
+        await update.message.reply_text("Nessuna chat registrata ancora.")
+        return
+    text = f"💬 <b>Chat che usano il bot</b> ({len(chats)})\n\n"
+    for c in chats[:30]:
+        title = escape(str(c.get('title') or c.get('id')))
+        text += f"• {title} — <b>{c.get('count', 0)}</b> download\n"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
 # =========================
 # DOWNLOAD HANDLER
 # =========================
@@ -510,6 +733,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info(f"Received message from {update.effective_user.id} with {len(valid_urls)} valid links")
+
+    # Registra la chat (per /chats)
+    try:
+        ch = update.effective_chat
+        await ranking_store.record_chat(ch.id, ch.title or ch.full_name or str(ch.id))
+    except Exception:
+        pass
 
     # Downloader condiviso (singleton)
     dl = get_downloader()
@@ -630,7 +860,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=msg.chat_id,
                         video=f,
                         caption=caption,
-                        parse_mode=ParseMode.HTML
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=video_buttons(url, msg.from_user.id),
                     )
                 sent_ok = True
                 _fc = _fid_from_msg(_m)
@@ -933,6 +1164,16 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
 
     await ranking_store.reset_weekly()
 
+
+async def weekly_redeploy(context: ContextTypes.DEFAULT_TYPE):
+    """Redeploy settimanale: ribuilda l'immagine -> yt-dlp e plugin freschi.
+    Sicuro: se il build fallisce, Render tiene live la versione attuale.
+    Attivo solo se RENDER_API_KEY e RENDER_SERVICE_ID sono configurati."""
+    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
+        return
+    ok = await asyncio.to_thread(render_trigger_deploy)
+    logger.info(f"Auto-redeploy settimanale: {'avviato' if ok else 'fallito'}")
+
 # =========================
 # WEB SERVER (RENDER)
 # =========================
@@ -1082,6 +1323,11 @@ def main():
     application.add_handler(CommandHandler("mensile", mensile_cmd))
     application.add_handler(CommandHandler("record", record_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
+    application.add_handler(CommandHandler("setcookies", setcookies_cmd))
+    application.add_handler(CommandHandler("chats", chats_cmd))
+    application.add_handler(CallbackQueryHandler(on_callback))
+    # File inviato dall'admin per /setcookies
+    application.add_handler(MessageHandler(filters.Document.ALL, on_document))
     # Log all text messages first to verify visibility
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
     application.add_error_handler(error_handler)
@@ -1105,6 +1351,14 @@ def main():
             hourly_funny_routine,
             time=time(hour=funny_hour, minute=0),
             chat_id=GROUP_CHAT_ID
+        )
+
+    # Redeploy automatico settimanale (yt-dlp/plugin freschi). Solo se Render configurato.
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        application.job_queue.run_daily(
+            weekly_redeploy,
+            time=time(hour=5, minute=0),
+            days=(0,),  # lunedì
         )
 
     if USE_WEBHOOK and WEBHOOK_URL:

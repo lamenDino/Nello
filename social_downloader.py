@@ -950,3 +950,34 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
 
         return {'success': False, 'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'}
+
+    async def download_audio(self, url: str) -> Dict:
+        """Estrae l'audio (MP3) dal contenuto. Usato dal bottone 'Audio'."""
+        clean_url = self.clean_url(url)
+        opts = self.get_ydl_opts(clean_url, 0)
+        opts['format'] = 'bestaudio/best'
+        opts['outtmpl'] = os.path.join(self.temp_dir, 'audio_%(id)s.%(ext)s')
+        opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+        opts.pop('merge_output_format', None)
+        opts.pop('max_filesize', None)
+
+        loop = asyncio.get_event_loop()
+
+        def _dl():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(clean_url, download=True)
+                base = ydl.prepare_filename(info)
+                mp3 = os.path.splitext(base)[0] + '.mp3'
+                return mp3, (info.get('title') or 'audio'), (info.get('uploader') or info.get('channel'))
+
+        try:
+            mp3, title, uploader = await loop.run_in_executor(None, _dl)
+            if mp3 and os.path.exists(mp3) and os.path.getsize(mp3) > 0:
+                return {'success': True, 'file_path': mp3, 'title': title, 'uploader': uploader}
+        except Exception as e:
+            logger.warning(f"Audio download fallito per {url}: {str(e)[:160]}")
+        return {'success': False, 'error': 'Estrazione audio fallita.'}
