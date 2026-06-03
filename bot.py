@@ -688,7 +688,7 @@ def potoken_selftest():
         ydl_opts = {
             'quiet': True, 'no_warnings': True, 'skip_download': True,
             'verbose': True, 'logger': _L(),
-            'js_runtimes': 'deno',
+            'js_runtimes': {'deno': {}},
             'extractor_args': {'youtube': {'player_client': ['tv', 'web', 'mweb']}},
         }
         if cookie_copy:

@@ -255,7 +255,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             has_yt_cookies = os.path.exists(self.youtube_cookies)
 
             # Usa Deno come runtime JS per il solver EJS (risolve nsig/signature).
-            opts['js_runtimes'] = 'deno'
+            # Formato richiesto da yt-dlp: dict {runtime: {config}}.
+            opts['js_runtimes'] = {'deno': {}}
 
             # Attempt 0: 'tv' per primo (evita SABR), poi web/mweb. Cookie + po_token + Deno.
             if attempt == 0:
