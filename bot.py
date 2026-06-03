@@ -187,6 +187,48 @@ def media_label(info: dict) -> str:
     return "Foto"
 
 
+def _fmt_duration(sec) -> str:
+    try:
+        sec = int(sec)
+    except (ValueError, TypeError):
+        return ""
+    if sec <= 0:
+        return ""
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _human(n) -> str:
+    try:
+        n = int(n)
+    except (ValueError, TypeError):
+        return ""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace('.0M', 'M')
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K".replace('.0K', 'K')
+    return str(n)
+
+
+def _meta_line(info: dict) -> str:
+    """Riga opzionale con durata/views/like/autore, se disponibili."""
+    bits = []
+    d = _fmt_duration(info.get('duration'))
+    if d:
+        bits.append(f"⏱️ {d}")
+    v = _human(info.get('view_count'))
+    if v:
+        bits.append(f"👁️ {v}")
+    likes = _human(info.get('like_count'))
+    if likes:
+        bits.append(f"❤️ {likes}")
+    up = info.get('uploader') or info.get('channel')
+    if up and str(up).lower() not in ('sconosciuto', 'none', ''):
+        bits.append(f"✍️ {escape(str(up)[:40])}")
+    return "  ".join(bits)
+
+
 def build_caption(info: dict, url: str, sender_name: str, raw_title: str, sender_id: int = None) -> str:
     """Didascalia adattiva (Foto/Video/Contenuto) con icone casuali e accordo grammaticale."""
     label = media_label(info)
@@ -197,12 +239,83 @@ def build_caption(info: dict, url: str, sender_name: str, raw_title: str, sender
         sender = f'<a href="tg://user?id={sender_id}">{escape(sender_name)}</a>'
     else:
         sender = escape(sender_name)
-    return (
+    caption = (
         f"{icon_main} <b>{label} da:</b> {detect_platform(url)}\n"
         f"{random.choice(ICONS_USER)} <b>{label} {inviato} da:</b> {sender}\n"
         f"{random.choice(ICONS_LINK)} <b>Link originale:</b> {escape(url)}\n"
         f"{random.choice(ICONS_META)} <b>Info:</b> {escape(raw_title)}"
     )
+    meta = _meta_line(info)
+    if meta:
+        caption += f"\n📊 {meta}"
+    return caption
+
+# =========================
+# CACHE file_id (rinvio istantaneo)
+# =========================
+
+def _fid_from_msg(m):
+    """Estrae (tipo, file_id) da un Message inviato."""
+    if getattr(m, 'video', None):
+        return ('video', m.video.file_id)
+    if getattr(m, 'photo', None):
+        return ('photo', m.photo[-1].file_id)
+    if getattr(m, 'animation', None):
+        return ('animation', m.animation.file_id)
+    if getattr(m, 'document', None):
+        return ('document', m.document.file_id)
+    return None
+
+
+def build_cache_payload(captured: list, platform: str, title: str) -> dict:
+    """captured = lista di (tipo, file_id). Costruisce il payload da mettere in cache."""
+    if not captured:
+        return None
+    if len(captured) == 1:
+        t, fid = captured[0]
+        return {'kind': t, 'fid': fid, 'platform': platform, 'title': title}
+    return {'kind': 'carousel', 'platform': platform, 'title': title,
+            'items': [{'t': t, 'fid': fid} for t, fid in captured]}
+
+
+async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
+    """Rinvia un media gia' caricato usando il file_id (nessun download). True se riuscito."""
+    sender = f'<a href="tg://user?id={msg.from_user.id}">{escape(msg.from_user.full_name)}</a>'
+    caption = (
+        f"♻️ <b>Ripescato dalla cache</b> (già postato)\n"
+        f"{random.choice(ICONS_USER)} <b>Rimesso da:</b> {sender}\n"
+        f"{random.choice(ICONS_LINK)} <b>Link:</b> {escape(url)}"
+    )
+    try:
+        kind = cached.get('kind')
+        if kind == 'video':
+            await context.bot.send_video(chat_id=msg.chat_id, video=cached['fid'],
+                                         caption=caption, parse_mode=ParseMode.HTML)
+        elif kind in ('photo', 'animation', 'document'):
+            send = {'photo': context.bot.send_photo, 'animation': context.bot.send_animation,
+                    'document': context.bot.send_document}[kind]
+            kw = {'photo': 'photo', 'animation': 'animation', 'document': 'document'}[kind]
+            await send(chat_id=msg.chat_id, caption=caption, parse_mode=ParseMode.HTML,
+                       **{kw: cached['fid']})
+        elif kind == 'carousel':
+            items = cached.get('items', [])
+            media = []
+            for idx, it in enumerate(items[:10]):
+                cap = caption if idx == 0 else None
+                if it.get('t') == 'video':
+                    media.append(InputMediaVideo(media=it['fid'], caption=cap, parse_mode=ParseMode.HTML))
+                else:
+                    media.append(InputMediaPhoto(media=it['fid'], caption=cap, parse_mode=ParseMode.HTML))
+            if not media:
+                return False
+            await context.bot.send_media_group(chat_id=msg.chat_id, media=media)
+        else:
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Resend da cache fallito ({url}): {e}")
+        return False
+
 
 # =========================
 # DEDUP / RATE LIMIT / ACHIEVEMENT
@@ -405,23 +518,15 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     original_message_deleted = False
 
     for i, url in enumerate(valid_urls):
-        # "Già postato": se il link è stato scaricato di recente, non riscaricarlo
+        key = link_key(url)
+
+        # Cache file_id: se il media è già stato caricato, lo rinvio all'istante
+        # (niente download, niente cookie bruciati). Nessun punto extra (anti-farm).
         try:
-            prior = await ranking_store.check_link(link_key(url))
+            cached = await ranking_store.get_cached(key)
         except Exception:
-            prior = None
-        if prior:
-            import time as _t
-            giorni = max(1, int((_t.time() - float(prior.get('t', 0))) / 86400))
-            quando = "oggi" if giorni <= 1 else f"{giorni} giorni fa"
-            who = prior.get('n', 'qualcuno')
-            try:
-                await msg.reply_text(
-                    f"😏 Questo l'aveva già messo <b>{escape(str(who))}</b> ({quando})! Niente bis.",
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
+            cached = None
+        if cached and await resend_from_cache(context, msg, cached, url):
             continue
 
         # Feedback di caricamento differenziato per link
@@ -499,6 +604,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # (vedi sotto): così contiamo i video realmente consegnati nel gruppo,
             # non quelli scaricati ma poi falliti in fase di invio.
             sent_ok = False
+            captured = []  # (tipo, file_id) per la cache del rinvio istantaneo
 
             # Truncate title to 3 lines max
             raw_title = info.get('title', 'N/A')
@@ -520,13 +626,16 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # === VIDEO ===
             if info.get("type", "video") == "video":
                 with open(info["file_path"], "rb") as f:
-                    await context.bot.send_video(
+                    _m = await context.bot.send_video(
                         chat_id=msg.chat_id,
                         video=f,
                         caption=caption,
                         parse_mode=ParseMode.HTML
                     )
                 sent_ok = True
+                _fc = _fid_from_msg(_m)
+                if _fc:
+                    captured.append(_fc)
                 try:
                     os.remove(info["file_path"])
                 except Exception:
@@ -548,20 +657,23 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         with open(photo_path, "rb") as f:
                             if is_video:
-                                await context.bot.send_video(
+                                _m = await context.bot.send_video(
                                     chat_id=msg.chat_id,
                                     video=f,
                                     caption=caption,
                                     parse_mode=ParseMode.HTML
                                 )
                             else:
-                                await context.bot.send_photo(
+                                _m = await context.bot.send_photo(
                                     chat_id=msg.chat_id,
                                     photo=f,
                                     caption=caption,
                                     parse_mode=ParseMode.HTML
                                 )
                         sent_ok = True
+                        _fc = _fid_from_msg(_m)
+                        if _fc:
+                            captured.append(_fc)
                     except Exception as e:
                         err_str = str(e).lower()
                         if 'caption' in err_str and 'too long' in err_str:
@@ -570,10 +682,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              try:
                                  with open(photo_path, "rb") as f:
                                     if is_video:
-                                        await context.bot.send_video(chat_id=msg.chat_id, video=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                                        _m = await context.bot.send_video(chat_id=msg.chat_id, video=f, caption=short_caption, parse_mode=ParseMode.HTML)
                                     else:
-                                        await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
+                                        _m = await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
                                  sent_ok = True
+                                 _fc = _fid_from_msg(_m)
+                                 if _fc:
+                                     captured.append(_fc)
                              except Exception as inner_e:
                                  logger.error(f"Error sending single item matching caption retry: {inner_e}")
                                  await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (errore imprevisto).")
@@ -624,11 +739,15 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                         media.append(InputMediaPhoto(media=f))
 
                             try:
-                                await context.bot.send_media_group(
+                                _sent = await context.bot.send_media_group(
                                     chat_id=msg.chat_id,
                                     media=media
                                 )
                                 sent_ok = True
+                                for _sm in (_sent or []):
+                                    _fc = _fid_from_msg(_sm)
+                                    if _fc:
+                                        captured.append(_fc)
                             except Exception as e:
                                # Handle "caption too long" specifically
                                err_str = str(e).lower()
@@ -638,11 +757,15 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    if len(media) > 0:
                                        media[0].caption = caption[:950] + "..."
                                        try:
-                                           await context.bot.send_media_group(
+                                           _sent = await context.bot.send_media_group(
                                                 chat_id=msg.chat_id,
                                                 media=media
                                            )
                                            sent_ok = True
+                                           for _sm in (_sent or []):
+                                               _fc = _fid_from_msg(_sm)
+                                               if _fc:
+                                                   captured.append(_fc)
                                        except Exception as inner_e:
                                            logger.error(f"Failed retry sending media group: {inner_e}")
                                            await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (didascalia troppo lunga).")
@@ -666,6 +789,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # davvero consegnato il contenuto nel gruppo (1 contenuto = 1 punto).
             if sent_ok:
                 note_download_success(detect_platform(url))
+                # Salva i file_id in cache per il rinvio istantaneo dei prossimi repost
+                try:
+                    payload = build_cache_payload(captured, detect_platform(url), raw_title)
+                    if payload:
+                        await ranking_store.set_cached(key, payload)
+                except Exception as e:
+                    logger.warning(f"Cache file_id: set fallito: {e}")
                 try:
                     totals = await ranking_store.add_point(msg.from_user.id, msg.from_user.full_name)
                     # Registra il link per il "già postato"

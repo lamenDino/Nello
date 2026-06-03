@@ -38,6 +38,10 @@ MILESTONES = [(10, 'm10'), (50, 'm50'), (100, 'm100'), (250, 'm250'),
 RECENT_MAX = 400
 RECENT_TTL = 14 * 24 * 3600  # 14 giorni
 
+# Cache file_id Telegram (per rinviare un media gia' caricato senza riscaricarlo)
+CACHE_MAX = 800
+CACHE_TTL = 30 * 24 * 3600  # 30 giorni
+
 
 def _now():
     return datetime.now(_TZ) if _TZ else datetime.now()
@@ -71,6 +75,12 @@ class RankingStore:
         raise NotImplementedError
 
     async def record_link(self, key: str, user_id: int, name: str) -> None:
+        raise NotImplementedError
+
+    async def get_cached(self, key: str) -> Optional[Dict]:
+        raise NotImplementedError
+
+    async def set_cached(self, key: str, payload: Dict) -> None:
         raise NotImplementedError
 
 
@@ -129,12 +139,16 @@ def _user_stats(data: dict, user_id: int) -> Dict:
     }
 
 
-def _prune_recent(recent: dict) -> dict:
+def _prune(d: dict, maxn: int, ttl: int) -> dict:
     now = time.time()
-    items = [(k, v) for k, v in recent.items()
-             if isinstance(v, dict) and (now - float(v.get('t', 0))) < RECENT_TTL]
+    items = [(k, v) for k, v in d.items()
+             if isinstance(v, dict) and (now - float(v.get('t', 0))) < ttl]
     items.sort(key=lambda kv: float(kv[1].get('t', 0)), reverse=True)
-    return dict(items[:RECENT_MAX])
+    return dict(items[:maxn])
+
+
+def _prune_recent(recent: dict) -> dict:
+    return _prune(recent, RECENT_MAX, RECENT_TTL)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +213,16 @@ class JsonRankingStore(RankingStore):
         self.data['recent'] = _prune_recent(self.data['recent'])
         await asyncio.to_thread(self._save)
 
+    async def get_cached(self, key):
+        return (self.data.get('filecache', {}) or {}).get(key)
+
+    async def set_cached(self, key, payload):
+        self.data.setdefault('filecache', {})
+        payload = dict(payload); payload['t'] = time.time()
+        self.data['filecache'][key] = payload
+        self.data['filecache'] = _prune(self.data['filecache'], CACHE_MAX, CACHE_TTL)
+        await asyncio.to_thread(self._save)
+
 
 # ---------------------------------------------------------------------------
 # Backend: Firebase Firestore
@@ -208,6 +232,7 @@ class FirestoreRankingStore(RankingStore):
     def __init__(self, client):
         self._doc = client.collection('bot_state').document('rankings_v2')
         self._recent = client.collection('bot_state').document('recent_links')
+        self._cache = client.collection('bot_state').document('file_cache')
         logger.info("Ranking: backend Firebase Firestore attivo")
 
     def _read(self) -> dict:
@@ -263,6 +288,23 @@ class FirestoreRankingStore(RankingStore):
             recent[key] = {'u': user_id, 'n': name, 't': time.time()}
             recent = _prune_recent(recent)
             self._recent.set(recent)
+        await asyncio.to_thread(_op)
+
+    async def get_cached(self, key):
+        def _op():
+            snap = self._cache.get()
+            cache = (snap.to_dict() or {}) if snap.exists else {}
+            return cache.get(key)
+        return await asyncio.to_thread(_op)
+
+    async def set_cached(self, key, payload):
+        def _op():
+            snap = self._cache.get()
+            cache = (snap.to_dict() or {}) if snap.exists else {}
+            p = dict(payload); p['t'] = time.time()
+            cache[key] = p
+            cache = _prune(cache, CACHE_MAX, CACHE_TTL)
+            self._cache.set(cache)
         await asyncio.to_thread(_op)
 
 

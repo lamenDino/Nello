@@ -824,6 +824,9 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                     'title': title,
                     'uploader': uploader,
                     'duration': info.get('duration', 0),
+                    'view_count': info.get('view_count'),
+                    'like_count': info.get('like_count'),
+                    'channel': info.get('channel'),
                     'platform': platform,
                     'url': clean_url
                 }
