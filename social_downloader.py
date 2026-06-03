@@ -258,15 +258,16 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             # Formato richiesto da yt-dlp: dict {runtime: {config}}.
             opts['js_runtimes'] = {'deno': {}}
 
-            # Attempt 0: 'tv' per primo (evita SABR), poi web/mweb. Cookie + po_token + Deno.
+            # Attempt 0: SOLO 'tv' (veloce: 1 sola chiamata player; evita SABR e funziona
+            # con po_token+Deno). Interrogare piu' client e' molto piu' lento.
             if attempt == 0:
-                opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'web', 'mweb']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
-            # Attempt 1: altri client autenticati di ripiego
+            # Attempt 1: client web autenticati di ripiego
             elif attempt == 1:
-                opts['extractor_args'] = {'youtube': {'player_client': ['web_safari', 'tv_embedded', 'mweb']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['web_safari', 'mweb', 'web']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 

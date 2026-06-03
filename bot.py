@@ -60,6 +60,9 @@ COOKIE_TARGETS = {
 # Limite di upload della Bot API di Telegram (50MB per i bot standard)
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
 
+# Timeout complessivo per un singolo download (oltre, si molla e si avvisa l'utente)
+DOWNLOAD_TIMEOUT = int(os.getenv('DOWNLOAD_TIMEOUT', '150'))
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -768,7 +771,26 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            info = await dl.download_video(url)
+            # Timeout complessivo: evita che un download impallato (es. YouTube via
+            # Deno/bgutil che si blocca) lasci il bot appeso su "Download in corso".
+            try:
+                info = await asyncio.wait_for(dl.download_video(url), timeout=DOWNLOAD_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout download ({DOWNLOAD_TIMEOUT}s) per {url}")
+                await note_download_failure(detect_platform(url), context)
+                try:
+                    await context.bot.send_message(
+                        chat_id=msg.chat_id,
+                        text=f"⏳ <b>Ci ho messo troppo</b> e ho mollato il colpo su questo link. Riprova tra poco.\n(Link: {escape(url)})",
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+                try:
+                    await loading.delete()
+                except Exception:
+                    pass
+                continue
 
             # ❌ fallimento → informa l'utente e passa al prossimo
             if not info or not info.get("success"):
@@ -1340,9 +1362,8 @@ def main():
         chat_id=GROUP_CHAT_ID
     )
 
-    # Post divertente giornaliero (orario configurabile via FUNNY_HOUR, default 13:00).
-    # Disattivabile con FUNNY_DAILY=0.
-    if os.getenv('FUNNY_DAILY', '1') == '1':
+    # Post divertente giornaliero: DISATTIVATO di default (riattivabile con FUNNY_DAILY=1).
+    if os.getenv('FUNNY_DAILY', '0') == '1':
         try:
             funny_hour = int(os.getenv('FUNNY_HOUR', '13'))
         except ValueError:
