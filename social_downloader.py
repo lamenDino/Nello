@@ -258,10 +258,10 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             # Formato richiesto da yt-dlp: dict {runtime: {config}}.
             opts['js_runtimes'] = {'deno': {}}
 
-            # Attempt 0: SOLO 'tv' (veloce: 1 sola chiamata player; evita SABR e funziona
-            # con po_token+Deno). Interrogare piu' client e' molto piu' lento.
+            # Attempt 0: 'tv' (veloce, evita SABR) + web/mweb come copertura nella stessa
+            # passata (alcuni video sono disponibili solo su certi client).
             if attempt == 0:
-                opts['extractor_args'] = {'youtube': {'player_client': ['tv']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'mweb', 'web']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
@@ -837,6 +837,17 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
 
                 # Errori specifici
+                # Video genuinamente non disponibile (privato/rimosso/riservato): inutile
+                # insistere o passare a Cobalt -> messaggio chiaro all'utente.
+                if ('video unavailable' in err or 'private video' in err
+                        or 'video has been removed' in err or 'who has blocked it' in err
+                        or 'this video is not available' in err
+                        or ('not available' in err and 'country' in err)
+                        or 'age' in err and 'confirm' in err):
+                    return {'success': False, 'error': (
+                        '🔒 Questo video non è disponibile: potrebbe essere privato, rimosso, '
+                        'o riservato (età/area geografica). YouTube non lo concede.'
+                    )}
                 if 'sign in' in err or 'bot' in err:
                     logger.warning("Bot detection! Breaking to shortcuts.")
                     break # break to safe fallbacks
