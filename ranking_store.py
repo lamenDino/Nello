@@ -1,43 +1,140 @@
 #!/usr/bin/env python3
 """
-Storage astratto per il ranking settimanale.
+Storage del ranking + statistiche del bot.
+
+Tiene tre classifiche (settimanale / mensile / all-time), una cache dei nomi
+utente, gli achievement gia' assegnati e una memoria dei link recenti (per il
+rilevamento "gia' postato"). La settimanale viene azzerata dal job del sabato;
+la mensile si azzera da sola al cambio di mese; l'all-time non si azzera mai.
 
 Due backend intercambiabili:
-  - FirestoreRankingStore: persistenza reale su Firebase Firestore (consigliato in
-    produzione: sopravvive ai redeploy/restart del container su Render).
-  - JsonRankingStore: fallback su file locale (sviluppo locale o assenza di
-    credenziali Firebase). NB: su filesystem effimero non sopravvive ai redeploy.
+  - FirestoreRankingStore: persistenza reale su Firebase (consigliato in prod).
+  - JsonRankingStore: fallback su file locale (sviluppo / assenza credenziali).
 
-La scelta del backend e' automatica: se le credenziali Firebase sono presenti si usa
-Firestore, altrimenti si ripiega sul JSON. L'interfaccia e' asincrona e le operazioni
-di rete/IO girano in un thread separato per non bloccare l'event loop del bot.
-
-Credenziali Firebase accettate (in ordine di priorita'):
-  - env FIREBASE_CREDENTIALS_JSON  -> contenuto JSON del service account
-  - env FIREBASE_CREDENTIALS_FILE / GOOGLE_APPLICATION_CREDENTIALS -> path al file
-  - /etc/secrets/firebase_credentials.json  (Render Secret File di default)
+Interfaccia asincrona; le operazioni di IO/rete girano in un thread separato.
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
-from typing import Dict
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+try:
+    import pytz
+    _TZ = pytz.timezone('Europe/Rome')
+except Exception:
+    _TZ = None
 
 logger = logging.getLogger(__name__)
 
+# Soglie achievement (numero di contenuti all-time) -> codice
+MILESTONES = [(10, 'm10'), (50, 'm50'), (100, 'm100'), (250, 'm250'),
+              (500, 'm500'), (1000, 'm1000')]
+
+# Limiti memoria link recenti
+RECENT_MAX = 400
+RECENT_TTL = 14 * 24 * 3600  # 14 giorni
+
+
+def _now():
+    return datetime.now(_TZ) if _TZ else datetime.now()
+
+
+def _month_key() -> str:
+    n = _now()
+    return f"{n.year}-{n.month:02d}"
+
 
 class RankingStore:
-    """Interfaccia comune."""
-
-    async def add_point(self, user_id: int) -> None:
+    async def add_point(self, user_id: int, name: str) -> Dict[str, int]:
         raise NotImplementedError
 
-    async def get_all(self) -> Dict[int, int]:
+    async def get_board(self, period: str, limit: int = 10) -> List[Tuple[int, int, str]]:
         raise NotImplementedError
 
-    async def reset(self) -> None:
+    async def get_user_stats(self, user_id: int) -> Dict:
         raise NotImplementedError
+
+    async def reset_weekly(self) -> None:
+        raise NotImplementedError
+
+    async def get_earned(self, user_id: int) -> set:
+        raise NotImplementedError
+
+    async def add_earned(self, user_id: int, code: str) -> None:
+        raise NotImplementedError
+
+    async def check_link(self, key: str) -> Optional[Dict]:
+        raise NotImplementedError
+
+    async def record_link(self, key: str, user_id: int, name: str) -> None:
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Logica condivisa (pura) riutilizzata dai due backend
+# ---------------------------------------------------------------------------
+
+def _apply_point(data: dict, user_id: int, name: str) -> Dict[str, int]:
+    """Incrementa weekly/monthly/alltime in `data` (dict di mappe). Gestisce il
+    rollover mensile. Ritorna i nuovi totali."""
+    uid = str(user_id)
+    for k in ('weekly', 'monthly', 'alltime', 'names', 'earned'):
+        data.setdefault(k, {})
+    # Rollover mensile
+    cur = _month_key()
+    if data.get('month_key') != cur:
+        data['monthly'] = {}
+        data['month_key'] = cur
+    for period in ('weekly', 'monthly', 'alltime'):
+        data[period][uid] = int(data[period].get(uid, 0)) + 1
+    if name:
+        data['names'][uid] = name
+    return {
+        'weekly': data['weekly'][uid],
+        'monthly': data['monthly'][uid],
+        'alltime': data['alltime'][uid],
+    }
+
+
+def _build_board(data: dict, period: str, limit: int) -> List[Tuple[int, int, str]]:
+    counts = data.get(period, {}) or {}
+    names = data.get('names', {}) or {}
+    rows = []
+    for uid, cnt in counts.items():
+        try:
+            rows.append((int(uid), int(cnt), names.get(uid, 'Utente')))
+        except (ValueError, TypeError):
+            continue
+    rows.sort(key=lambda x: x[1], reverse=True)
+    return rows[:limit]
+
+
+def _user_stats(data: dict, user_id: int) -> Dict:
+    uid = str(user_id)
+    alltime = data.get('alltime', {}) or {}
+    # rank all-time (1-based)
+    ordered = sorted(alltime.items(), key=lambda x: int(x[1]), reverse=True)
+    rank = next((i + 1 for i, (u, _c) in enumerate(ordered) if u == uid), None)
+    return {
+        'weekly': int((data.get('weekly', {}) or {}).get(uid, 0)),
+        'monthly': int((data.get('monthly', {}) or {}).get(uid, 0)),
+        'alltime': int(alltime.get(uid, 0)),
+        'rank': rank,
+        'total_users': len(alltime),
+        'name': (data.get('names', {}) or {}).get(uid, 'Utente'),
+    }
+
+
+def _prune_recent(recent: dict) -> dict:
+    now = time.time()
+    items = [(k, v) for k, v in recent.items()
+             if isinstance(v, dict) and (now - float(v.get('t', 0))) < RECENT_TTL]
+    items.sort(key=lambda kv: float(kv[1].get('t', 0)), reverse=True)
+    return dict(items[:RECENT_MAX])
 
 
 # ---------------------------------------------------------------------------
@@ -47,42 +144,59 @@ class RankingStore:
 class JsonRankingStore(RankingStore):
     def __init__(self, path: str):
         self.path = path
-        self.data: Dict[int, int] = self._load()
-        logger.info(f"Ranking: backend JSON locale ({self.path}, {len(self.data)} utenti)")
+        self.data = self._load()
+        logger.info(f"Ranking: backend JSON locale ({self.path})")
 
-    def _load(self) -> Dict[int, int]:
-        out: Dict[int, int] = {}
+    def _load(self) -> dict:
         try:
             if os.path.exists(self.path):
                 with open(self.path, 'r', encoding='utf-8') as f:
-                    raw = json.load(f)
-                for k, v in raw.items():
-                    try:
-                        out[int(k)] = int(v)
-                    except (ValueError, TypeError):
-                        continue
+                    return json.load(f)
         except Exception as e:
             logger.warning(f"Ranking JSON: load fallito: {e}")
-        return out
+        return {}
 
-    def _save(self) -> None:
+    def _save(self):
         try:
             tmp = self.path + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump({str(k): v for k, v in self.data.items()}, f)
+                json.dump(self.data, f)
             os.replace(tmp, self.path)
         except Exception as e:
             logger.warning(f"Ranking JSON: save fallito: {e}")
 
-    async def add_point(self, user_id: int) -> None:
-        self.data[user_id] = self.data.get(user_id, 0) + 1
+    async def add_point(self, user_id, name):
+        totals = _apply_point(self.data, user_id, name)
+        await asyncio.to_thread(self._save)
+        return totals
+
+    async def get_board(self, period, limit=10):
+        return _build_board(self.data, period, limit)
+
+    async def get_user_stats(self, user_id):
+        return _user_stats(self.data, user_id)
+
+    async def reset_weekly(self):
+        self.data['weekly'] = {}
         await asyncio.to_thread(self._save)
 
-    async def get_all(self) -> Dict[int, int]:
-        return dict(self.data)
+    async def get_earned(self, user_id):
+        return set((self.data.get('earned', {}) or {}).get(str(user_id), []))
 
-    async def reset(self) -> None:
-        self.data = {}
+    async def add_earned(self, user_id, code):
+        self.data.setdefault('earned', {})
+        lst = self.data['earned'].setdefault(str(user_id), [])
+        if code not in lst:
+            lst.append(code)
+            await asyncio.to_thread(self._save)
+
+    async def check_link(self, key):
+        return (self.data.get('recent', {}) or {}).get(key)
+
+    async def record_link(self, key, user_id, name):
+        self.data.setdefault('recent', {})
+        self.data['recent'][key] = {'u': user_id, 'n': name, 't': time.time()}
+        self.data['recent'] = _prune_recent(self.data['recent'])
         await asyncio.to_thread(self._save)
 
 
@@ -92,39 +206,63 @@ class JsonRankingStore(RankingStore):
 
 class FirestoreRankingStore(RankingStore):
     def __init__(self, client):
-        from firebase_admin import firestore
-        self._firestore = firestore
-        # Documento unico: bot_state/weekly_ranking con campo mappa "counts"
-        self._doc = client.collection('bot_state').document('weekly_ranking')
+        self._doc = client.collection('bot_state').document('rankings_v2')
+        self._recent = client.collection('bot_state').document('recent_links')
         logger.info("Ranking: backend Firebase Firestore attivo")
 
-    async def add_point(self, user_id: int) -> None:
+    def _read(self) -> dict:
+        snap = self._doc.get()
+        return (snap.to_dict() or {}) if snap.exists else {}
+
+    async def add_point(self, user_id, name):
         def _op():
-            # Increment atomico sul campo annidato counts.<user_id>
-            self._doc.set(
-                {'counts': {str(user_id): self._firestore.Increment(1)}},
-                merge=True,
-            )
+            data = self._read()
+            totals = _apply_point(data, user_id, name)
+            self._doc.set(data)
+            return totals
+        return await asyncio.to_thread(_op)
+
+    async def get_board(self, period, limit=10):
+        data = await asyncio.to_thread(self._read)
+        return _build_board(data, period, limit)
+
+    async def get_user_stats(self, user_id):
+        data = await asyncio.to_thread(self._read)
+        return _user_stats(data, user_id)
+
+    async def reset_weekly(self):
+        def _op():
+            self._doc.set({'weekly': {}}, merge=True)
         await asyncio.to_thread(_op)
 
-    async def get_all(self) -> Dict[int, int]:
-        def _op():
-            snap = self._doc.get()
-            if not snap.exists:
-                return {}
-            return (snap.to_dict() or {}).get('counts', {}) or {}
-        raw = await asyncio.to_thread(_op)
-        out: Dict[int, int] = {}
-        for k, v in raw.items():
-            try:
-                out[int(k)] = int(v)
-            except (ValueError, TypeError):
-                continue
-        return out
+    async def get_earned(self, user_id):
+        data = await asyncio.to_thread(self._read)
+        return set((data.get('earned', {}) or {}).get(str(user_id), []))
 
-    async def reset(self) -> None:
+    async def add_earned(self, user_id, code):
         def _op():
-            self._doc.set({'counts': {}})
+            data = self._read()
+            data.setdefault('earned', {})
+            lst = data['earned'].setdefault(str(user_id), [])
+            if code not in lst:
+                lst.append(code)
+                self._doc.set({'earned': {str(user_id): lst}}, merge=True)
+        await asyncio.to_thread(_op)
+
+    async def check_link(self, key):
+        def _op():
+            snap = self._recent.get()
+            recent = (snap.to_dict() or {}) if snap.exists else {}
+            return recent.get(key)
+        return await asyncio.to_thread(_op)
+
+    async def record_link(self, key, user_id, name):
+        def _op():
+            snap = self._recent.get()
+            recent = (snap.to_dict() or {}) if snap.exists else {}
+            recent[key] = {'u': user_id, 'n': name, 't': time.time()}
+            recent = _prune_recent(recent)
+            self._recent.set(recent)
         await asyncio.to_thread(_op)
 
 

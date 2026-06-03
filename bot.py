@@ -14,6 +14,7 @@ import asyncio
 import random
 import pytz
 from datetime import time, datetime
+from collections import defaultdict
 
 from aiohttp import web
 from telegram import Update
@@ -39,6 +40,9 @@ PORT = int(os.getenv("PORT", "8080"))
 
 GROUP_CHAT_ID = int(os.getenv('CHAT_ID') or os.getenv('GROUP_CHAT_ID') or '214193849')
 
+# Admin a cui mandare gli avvisi (es. cookie scaduti). Default: GROUP_CHAT_ID.
+ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID') or '0') or GROUP_CHAT_ID
+
 # Limite di upload della Bot API di Telegram (50MB per i bot standard)
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
 
@@ -46,6 +50,10 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+# Sicurezza: httpx logga l'URL completo delle richieste, che contiene il TOKEN del bot.
+# Alzo il livello a WARNING per non scriverlo nei log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Updater").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # =========================
@@ -117,10 +125,11 @@ def get_downloader() -> SocialMediaDownloader:
 
 def is_supported_link(url: str) -> bool:
     is_supported = any(d in url for d in [
-        "tiktok.com", "instagram.com", "facebook.com",
-        "youtube.com", "youtu.be", "twitter.com", "x.com"
+        "tiktok.com", "instagram.com", "facebook.com", "fb.watch",
+        "youtube.com", "youtu.be", "twitter.com", "x.com",
+        "reddit.com", "redd.it", "twitch.tv",
     ])
-    
+
     if not is_supported:
         return False
 
@@ -136,7 +145,7 @@ def detect_platform(url: str) -> str:
         return "TikTok"
     if "instagram" in url:
         return "Instagram"
-    if "facebook" in url:
+    if "facebook" in url or "fb.watch" in url:
         return "Facebook"
     if "youtube" in url or "youtu.be" in url:
         if "/shorts/" in url:
@@ -144,6 +153,10 @@ def detect_platform(url: str) -> str:
         return "YouTube"
     if "twitter" in url or "x.com" in url:
         return "Twitter / X"
+    if "reddit" in url or "redd.it" in url:
+        return "Reddit"
+    if "twitch" in url:
+        return "Twitch"
     return "Sconosciuta"
 
 # =========================
@@ -174,17 +187,111 @@ def media_label(info: dict) -> str:
     return "Foto"
 
 
-def build_caption(info: dict, url: str, sender_name: str, raw_title: str) -> str:
+def build_caption(info: dict, url: str, sender_name: str, raw_title: str, sender_id: int = None) -> str:
     """Didascalia adattiva (Foto/Video/Contenuto) con icone casuali e accordo grammaticale."""
     label = media_label(info)
     inviato = "inviata" if label == "Foto" else "inviato"
     icon_main = random.choice(ICONS_FOTO if label == "Foto" else ICONS_VIDEO)
+    # Menzione cliccabile del mittente (notifica e link al profilo)
+    if sender_id:
+        sender = f'<a href="tg://user?id={sender_id}">{escape(sender_name)}</a>'
+    else:
+        sender = escape(sender_name)
     return (
         f"{icon_main} <b>{label} da:</b> {detect_platform(url)}\n"
-        f"{random.choice(ICONS_USER)} <b>{label} {inviato} da:</b> {escape(sender_name)}\n"
+        f"{random.choice(ICONS_USER)} <b>{label} {inviato} da:</b> {sender}\n"
         f"{random.choice(ICONS_LINK)} <b>Link originale:</b> {escape(url)}\n"
         f"{random.choice(ICONS_META)} <b>Info:</b> {escape(raw_title)}"
     )
+
+# =========================
+# DEDUP / RATE LIMIT / ACHIEVEMENT
+# =========================
+
+def link_key(url: str) -> str:
+    """Chiave normalizzata di un link (per 'gia' postato'): host+path senza query."""
+    u = url.strip().lower().split('?')[0].split('#')[0]
+    u = u.replace('https://', '').replace('http://', '').replace('www.', '')
+    return u.rstrip('/')
+
+
+# Rate limit anti-spam: max N download/ora per utente (in memoria, si azzera ai restart)
+RATE_MAX_PER_HOUR = int(os.getenv('RATE_MAX_PER_HOUR', '20'))
+_rate_hits = defaultdict(list)
+
+
+def rate_limited(user_id: int) -> bool:
+    import time as _t
+    now = _t.time()
+    hits = [t for t in _rate_hits[user_id] if now - t < 3600]
+    _rate_hits[user_id] = hits
+    if len(hits) >= RATE_MAX_PER_HOUR:
+        return True
+    hits.append(now)
+    return False
+
+
+# Achievement: codice -> (emoji+testo). I milestone numerici sono gestiti a parte.
+ACHIEVEMENTS = {
+    'm10': '🥉 <b>10 contenuti!</b> Ti stai scaldando.',
+    'm50': '🥈 <b>50 contenuti!</b> Un veterano.',
+    'm100': '🥇 <b>100 contenuti!</b> Leggenda del gruppo.',
+    'm250': '🏆 <b>250 contenuti!</b> Inarrestabile.',
+    'm500': '💎 <b>500 contenuti!</b> Macchina da download.',
+    'm1000': '👑 <b>1000 contenuti!</b> Il Re assoluto.',
+    'night': '🦉 <b>Nottambulo!</b> Download nel cuore della notte.',
+}
+
+
+def newly_earned(totals: dict, already: set) -> list:
+    """Ritorna i codici achievement appena sbloccati (non in `already`)."""
+    earned = []
+    alltime = totals.get('alltime', 0)
+    for threshold, code in [(10, 'm10'), (50, 'm50'), (100, 'm100'),
+                            (250, 'm250'), (500, 'm500'), (1000, 'm1000')]:
+        if alltime >= threshold and code not in already:
+            earned.append(code)
+    hour = datetime.now(pytz.timezone('Europe/Rome')).hour if pytz else datetime.now().hour
+    if 2 <= hour < 5 and 'night' not in already:
+        earned.append('night')
+    return earned
+
+
+# Avviso admin: se una piattaforma fallisce ripetutamente, probabilmente i cookie
+# sono scaduti. Conta i fallimenti consecutivi per piattaforma e avvisa l'admin
+# al massimo una volta all'ora per piattaforma.
+_fail_streak = defaultdict(int)
+_last_alert = {}
+FAIL_ALERT_THRESHOLD = 3
+
+
+async def note_download_failure(platform: str, context):
+    import time as _t
+    _fail_streak[platform] += 1
+    if _fail_streak[platform] < FAIL_ALERT_THRESHOLD:
+        return
+    now = _t.time()
+    if now - _last_alert.get(platform, 0) < 3600:
+        return
+    _last_alert[platform] = now
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=(
+                f"⚠️ <b>Attenzione admin</b>\n"
+                f"{platform} ha fallito {_fail_streak[platform]} download di fila.\n"
+                f"Probabile causa: <b>cookie {platform} scaduti</b>. "
+                f"Rigenera ed aggiorna il secret file su Render."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+
+def note_download_success(platform: str):
+    _fail_streak[platform] = 0
+
 
 # =========================
 # COMMANDS
@@ -192,7 +299,17 @@ def build_caption(info: dict, url: str, sender_name: str, raw_title: str) -> str
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Received /start in chat {update.effective_chat.id} from {update.effective_user.id}")
-    await update.message.reply_text(f"Ciao! Il Chat ID di questo gruppo è: <code>{update.effective_chat.id}</code>\nMandami un link video e penso io a tutto 🔥", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        "Ciao! Mandami un link da TikTok, Instagram, Facebook, YouTube Shorts, "
+        "Twitter/X, Reddit o Twitch e penso io a tutto 🔥\n\n"
+        "<b>Comandi:</b>\n"
+        "• /classifica — top della settimana\n"
+        "• /mensile — top del mese\n"
+        "• /record — albo d'oro all-time\n"
+        "• /stats — le tue statistiche\n\n"
+        f"Chat ID di questo gruppo: <code>{update.effective_chat.id}</code>",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def resolve_user_name(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
@@ -204,23 +321,53 @@ async def resolve_user_name(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
         return 'Utente'
 
 
-async def classifica_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra la classifica corrente (live) senza azzerarla."""
-    data = await ranking_store.get_all()
-    if not data:
-        await update.message.reply_text(
-            "📭 Nessun video in classifica questa settimana. Mandane uno! 🐶"
-        )
+async def _render_board(period: str, titolo: str, vuoto: str, update):
+    board = await ranking_store.get_board(period, limit=10)
+    if not board:
+        await update.message.reply_text(vuoto)
         return
-
-    sorted_users = sorted(data.items(), key=lambda x: x[1], reverse=True)
-
-    text = "🏆 <b>CLASSIFICA ATTUALE</b>\n\n"
-    for i, (user_id, count) in enumerate(sorted_users[:10]):
+    text = f"{titolo}\n\n"
+    for i, (user_id, count, name) in enumerate(board):
         badge = BADGES[i] if i < len(BADGES) else f"<b>{i + 1}.</b>"
-        name = await resolve_user_name(context, user_id)
-        text += f"{badge} {escape(name)} — <b>{count}</b> video\n"
+        mention = f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
+        text += f"{badge} {mention} — <b>{count}</b>\n"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True)
 
+
+async def classifica_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Classifica settimanale live (non azzera)."""
+    await _render_board('weekly', "🏆 <b>CLASSIFICA SETTIMANALE</b>",
+                        "📭 Nessun contenuto questa settimana. Mandane uno! 🐶", update)
+
+
+async def mensile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Classifica del mese."""
+    await _render_board('monthly', "📅 <b>CLASSIFICA DEL MESE</b>",
+                        "📭 Nessun contenuto questo mese.", update)
+
+
+async def record_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Classifica all-time."""
+    await _render_board('alltime', "🏛️ <b>ALBO D'ORO (ALL-TIME)</b>",
+                        "📭 Ancora nessun contenuto. La storia inizia ora!", update)
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Statistiche personali dell'utente."""
+    u = update.effective_user
+    s = await ranking_store.get_user_stats(u.id)
+    earned = await ranking_store.get_earned(u.id)
+    rank_txt = f"#{s['rank']} su {s['total_users']}" if s.get('rank') else "—"
+    badges = " ".join(ACHIEVEMENTS.get(c, "🏅").split()[0] for c in earned) or "nessuno ancora"
+    text = (
+        f"📊 <b>Le tue statistiche, {escape(u.first_name)}</b>\n\n"
+        f"📆 Questa settimana: <b>{s['weekly']}</b>\n"
+        f"🗓️ Questo mese: <b>{s['monthly']}</b>\n"
+        f"🏛️ Totale: <b>{s['alltime']}</b>\n"
+        f"🥇 Posizione all-time: <b>{rank_txt}</b>\n"
+        f"🎖️ Achievement: {badges}"
+    )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 # =========================
@@ -238,6 +385,17 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not valid_urls:
         return
 
+    # Anti-spam: limite di download/ora per utente
+    if rate_limited(msg.from_user.id):
+        try:
+            await msg.reply_text(
+                f"🚦 Ehi {escape(msg.from_user.first_name)}, vai piano! "
+                f"Hai raggiunto il limite di {RATE_MAX_PER_HOUR} download nell'ultima ora. Riprova più tardi."
+            )
+        except Exception:
+            pass
+        return
+
     logger.info(f"Received message from {update.effective_user.id} with {len(valid_urls)} valid links")
 
     # Downloader condiviso (singleton)
@@ -247,6 +405,25 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     original_message_deleted = False
 
     for i, url in enumerate(valid_urls):
+        # "Già postato": se il link è stato scaricato di recente, non riscaricarlo
+        try:
+            prior = await ranking_store.check_link(link_key(url))
+        except Exception:
+            prior = None
+        if prior:
+            import time as _t
+            giorni = max(1, int((_t.time() - float(prior.get('t', 0))) / 86400))
+            quando = "oggi" if giorni <= 1 else f"{giorni} giorni fa"
+            who = prior.get('n', 'qualcuno')
+            try:
+                await msg.reply_text(
+                    f"😏 Questo l'aveva già messo <b>{escape(str(who))}</b> ({quando})! Niente bis.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+            continue
+
         # Feedback di caricamento differenziato per link
         count_str = f"({i+1}/{len(valid_urls)})" if len(valid_urls) > 1 else ""
         loading = await context.bot.send_message(
@@ -262,7 +439,10 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not info or not info.get("success"):
                 nello_joke = random.choice(NELLO_ERRORS)
                 specific_error = info.get('error', 'Errore sconosciuto')
-                
+
+                # Traccia il fallimento per avvisare l'admin se è sistematico (cookie scaduti)
+                await note_download_failure(detect_platform(url), context)
+
                 try:
                     await context.bot.send_message(
                         chat_id=msg.chat_id,
@@ -331,7 +511,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  if len(raw_title) > 300:
                      raw_title = raw_title[:300] + "..."
 
-            caption = build_caption(info, url, msg.from_user.full_name, raw_title)
+            caption = build_caption(info, url, msg.from_user.full_name, raw_title, sender_id=msg.from_user.id)
 
             # =========================
             # INVIO CONTENUTI
@@ -485,8 +665,24 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Punto in classifica + rimozione del messaggio originale SOLO se abbiamo
             # davvero consegnato il contenuto nel gruppo (1 contenuto = 1 punto).
             if sent_ok:
+                note_download_success(detect_platform(url))
                 try:
-                    await ranking_store.add_point(msg.from_user.id)
+                    totals = await ranking_store.add_point(msg.from_user.id, msg.from_user.full_name)
+                    # Registra il link per il "già postato"
+                    await ranking_store.record_link(link_key(url), msg.from_user.id, msg.from_user.full_name)
+                    # Achievement appena sbloccati
+                    already = await ranking_store.get_earned(msg.from_user.id)
+                    for code in newly_earned(totals, already):
+                        await ranking_store.add_earned(msg.from_user.id, code)
+                        try:
+                            mention = f'<a href="tg://user?id={msg.from_user.id}">{escape(msg.from_user.first_name)}</a>'
+                            await context.bot.send_message(
+                                chat_id=msg.chat_id,
+                                text=f"🎉 {mention} ha sbloccato un achievement!\n{ACHIEVEMENTS.get(code, code)}",
+                                parse_mode=ParseMode.HTML,
+                            )
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning(f"Ranking: add_point fallito per {msg.from_user.id}: {e}")
                 if not original_message_deleted:
@@ -574,18 +770,12 @@ async def hourly_funny_routine(context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
-    data = await ranking_store.get_all()
-    if not data:
+    board = await ranking_store.get_board('weekly', limit=3)
+    if not board:
         return
 
     # Usa il chat_id del job se presente (così invia solo al gruppo configurato)
     chat_id = getattr(getattr(context, 'job', None), 'chat_id', None) or GROUP_CHAT_ID
-
-    sorted_users = sorted(
-        data.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
 
     aforisma = random.choice(AFORISMI)
     celebra = random.choice(["🎉", "🥳", "🎊", "🏅", "✨", "🔥", "👏", "🎈"])
@@ -595,9 +785,8 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
     # Mostra sempre i primi 3 posti (se mancano, mostra segnaposto)
     for i in range(3):
         badge = BADGES[i] if i < len(BADGES) else '•'
-        if i < len(sorted_users):
-            user_id, count = sorted_users[i]
-            name = await resolve_user_name(context, user_id)
+        if i < len(board):
+            user_id, count, name = board[i]
             # Menzione cliccabile: notifica il vincitore (funziona anche senza username)
             mention = f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
             text += f"{badge} {mention} — <b>{count}</b> video\n"
@@ -612,7 +801,7 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-    await ranking_store.reset()
+    await ranking_store.reset_weekly()
 
 # =========================
 # WEB SERVER (RENDER)
@@ -745,6 +934,9 @@ def main():
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("classifica", classifica_cmd))
+    application.add_handler(CommandHandler("mensile", mensile_cmd))
+    application.add_handler(CommandHandler("record", record_cmd))
+    application.add_handler(CommandHandler("stats", stats_cmd))
     # Log all text messages first to verify visibility
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
     print("Handlers added.")
@@ -756,12 +948,18 @@ def main():
         chat_id=GROUP_CHAT_ID
     )
 
-    # application.job_queue.run_repeating(
-    #     hourly_funny_routine,
-    #     interval=3600,
-    #     first=60,
-    #     chat_id=GROUP_CHAT_ID
-    # )
+    # Post divertente giornaliero (orario configurabile via FUNNY_HOUR, default 13:00).
+    # Disattivabile con FUNNY_DAILY=0.
+    if os.getenv('FUNNY_DAILY', '1') == '1':
+        try:
+            funny_hour = int(os.getenv('FUNNY_HOUR', '13'))
+        except ValueError:
+            funny_hour = 13
+        application.job_queue.run_daily(
+            hourly_funny_routine,
+            time=time(hour=funny_hour, minute=0),
+            chat_id=GROUP_CHAT_ID
+        )
 
     if USE_WEBHOOK and WEBHOOK_URL:
         # Run webhook server (python-telegram-bot will bind to PORT)
