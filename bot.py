@@ -903,6 +903,21 @@ def potoken_selftest():
             logger.info("[POT] nessuna riga rilevante nei log verbose")
 
 # =========================
+# ERROR HANDLER
+# =========================
+
+async def error_handler(update, context):
+    """Gestisce gli errori globali. Silenzia il Conflict transitorio dei deploy
+    (due istanze in polling per pochi secondi) che altrimenti sporca i log."""
+    from telegram.error import Conflict
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.info("getUpdates Conflict transitorio (cambio istanza al deploy), ignoro.")
+        return
+    logger.error(f"Errore non gestito: {err}", exc_info=err)
+
+
+# =========================
 # MAIN
 # =========================
 
@@ -939,6 +954,7 @@ def main():
     application.add_handler(CommandHandler("stats", stats_cmd))
     # Log all text messages first to verify visibility
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
+    application.add_error_handler(error_handler)
     print("Handlers added.")
 
     application.job_queue.run_daily(
