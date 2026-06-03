@@ -247,26 +247,25 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 'Origin': 'https://www.youtube.com',
             })
 
-            # IMPORTANTE (stato 2026): su IP datacenter YouTube chiede o l'autenticazione
-            # (cookie) o un po_token. Con i cookie il client 'web' passa il controllo bot
-            # ma restituisce solo formati DRM/storyboard ("Requested format is not
-            # available"). I client 'tv'/'web_safari'/'mweb' invece, CON i cookie,
-            # restituiscono formati reali senza bisogno del po_token.
+            # IMPORTANTE (stato 2026): su IP datacenter servono TRE cose:
+            #  1) cookie o po_token per passare il controllo bot (bgutil fornisce il po_token);
+            #  2) un runtime JS (Deno) + solver EJS per risolvere le sfide nsig/signature,
+            #     altrimenti i formati vengono scartati ("Requested format is not available");
+            #  3) un client che NON sia forzato su SABR (il client 'tv' va meglio del 'web').
             has_yt_cookies = os.path.exists(self.youtube_cookies)
 
-            # Con il provider po_token (bgutil) attivo, i client 'web'/'mweb' ottengono
-            # i formati anche su IP datacenter. Il plugin yt-dlp recupera il po_token
-            # in automatico dal server locale (porta 4416).
+            # Usa Deno come runtime JS per il solver EJS (risolve nsig/signature).
+            opts['js_runtimes'] = 'deno'
 
-            # Attempt 0: web/mweb + cookies + po_token (combinazione vincente sul server)
+            # Attempt 0: 'tv' per primo (evita SABR), poi web/mweb. Cookie + po_token + Deno.
             if attempt == 0:
-                opts['extractor_args'] = {'youtube': {'player_client': ['web', 'mweb', 'tv']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'web', 'mweb']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
-            # Attempt 1: altri client autenticati (ripiego se po_token non disponibile)
+            # Attempt 1: altri client autenticati di ripiego
             elif attempt == 1:
-                opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'web_safari', 'mweb']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['web_safari', 'tv_embedded', 'mweb']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 

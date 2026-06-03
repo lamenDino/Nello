@@ -7,10 +7,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
     libxml2-dev libxslt-dev \
-    curl ca-certificates gnupg \
+    curl ca-certificates gnupg unzip \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
+
+# Deno: runtime JS usato dal solver EJS di yt-dlp per risolvere le sfide nsig/signature
+# (senza, YouTube scarta i formati -> "Requested format is not available").
+RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip \
+ && unzip /tmp/deno.zip -d /usr/local/bin/ \
+ && rm /tmp/deno.zip \
+ && chmod +x /usr/local/bin/deno
 
 # po_token provider (bgutil): genera i po_token necessari a YouTube su IP datacenter.
 # Buildato in fase di immagine; verra' avviato come server locale da start.sh.
