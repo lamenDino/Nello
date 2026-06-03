@@ -396,7 +396,19 @@ def get_ranking_store(json_fallback_path: str) -> RankingStore:
     client = _init_firestore_client()
     if client is not None:
         try:
-            return FirestoreRankingStore(client)
+            store = FirestoreRankingStore(client)
+            # Health-check: una lettura di prova. Se Firestore non e' abilitato nel
+            # progetto, qui esce un 403 ESPLICITO (invece di fallire in silenzio dopo).
+            try:
+                client.collection('bot_state').document('_healthcheck').get()
+                logger.info("Ranking: Firestore raggiungibile (health-check OK)")
+            except Exception as he:
+                logger.error(
+                    "Ranking: FIRESTORE NON RAGGIUNGIBILE — i dati NON verranno salvati! "
+                    "Abilita 'Firestore Database' nella console Firebase del progetto. "
+                    f"Dettaglio: {str(he)[:200]}"
+                )
+            return store
         except Exception as e:
             logger.error(f"Ranking: Firestore non utilizzabile, fallback JSON: {e}")
     return JsonRankingStore(json_fallback_path)

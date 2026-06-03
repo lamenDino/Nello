@@ -535,7 +535,12 @@ async def resolve_user_name(context: ContextTypes.DEFAULT_TYPE, user_id: int) ->
 
 
 async def _render_board(period: str, titolo: str, vuoto: str, update):
-    board = await ranking_store.get_board(period, limit=10)
+    try:
+        board = await ranking_store.get_board(period, limit=10)
+    except Exception as e:
+        logger.warning(f"get_board fallito: {e}")
+        await update.message.reply_text("⚠️ Classifica non disponibile: il database non è raggiungibile.")
+        return
     if not board:
         await update.message.reply_text(vuoto)
         return
@@ -569,8 +574,13 @@ async def record_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Statistiche personali dell'utente."""
     u = update.effective_user
-    s = await ranking_store.get_user_stats(u.id)
-    earned = await ranking_store.get_earned(u.id)
+    try:
+        s = await ranking_store.get_user_stats(u.id)
+        earned = await ranking_store.get_earned(u.id)
+    except Exception as e:
+        logger.warning(f"stats fallito: {e}")
+        await update.message.reply_text("⚠️ Statistiche non disponibili: il database non è raggiungibile.")
+        return
     rank_txt = f"#{s['rank']} su {s['total_users']}" if s.get('rank') else "—"
     badges = " ".join(ACHIEVEMENTS.get(c, "🏅").split()[0] for c in earned) or "nessuno ancora"
     text = (
@@ -698,7 +708,17 @@ async def chats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("🔒 Solo l'admin può usare questo comando.")
         return
-    chats = await ranking_store.get_chats()
+    try:
+        chats = await ranking_store.get_chats()
+    except Exception as e:
+        logger.warning(f"get_chats fallito: {e}")
+        await update.message.reply_text(
+            "⚠️ Database non raggiungibile.\n"
+            "Probabile causa: <b>Firestore non abilitato</b> nel progetto Firebase. "
+            "Vai su console.firebase.google.com → progetto → <b>Firestore Database → Crea database</b>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
     if not chats:
         await update.message.reply_text("Nessuna chat registrata ancora.")
         return
