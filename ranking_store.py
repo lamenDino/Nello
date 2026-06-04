@@ -113,6 +113,15 @@ class RankingStore:
     async def get_challenge(self) -> Optional[Dict]:
         raise NotImplementedError
 
+    async def get_profile(self, user_id: int) -> Dict:
+        raise NotImplementedError
+
+    async def incr_medal(self, user_id: int) -> None:
+        raise NotImplementedError
+
+    async def monthly_active_users(self) -> List[int]:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Logica condivisa (pura) riutilizzata dai due backend
@@ -276,6 +285,33 @@ def _top_voted_month(votes: dict, limit: int, month_key: str):
     return rows[:limit]
 
 
+def _profile(rankings: dict, votes: dict, user_id, month_key: str) -> dict:
+    """Profilo completo: statistiche + voti ricevuti + miglior video + medaglie."""
+    uid = str(user_id)
+    st = _user_stats(rankings, user_id)  # weekly/monthly/alltime/rank/total_users/name
+    votes_recv = 0
+    votes_recv_month = 0
+    best_video = 0
+    for rec in (votes or {}).values():
+        if not isinstance(rec, dict) or str(rec.get('o')) != uid:
+            continue
+        c = int(rec.get('c', 0))
+        votes_recv += c
+        best_video = max(best_video, c)
+        t = float(rec.get('t', 0))
+        dt = datetime.fromtimestamp(t, _TZ) if _TZ else datetime.fromtimestamp(t)
+        if f"{dt.year}-{dt.month:02d}" == month_key:
+            votes_recv_month += c
+    st.update({
+        'votes_received': votes_recv,
+        'votes_received_month': votes_recv_month,
+        'best_video': best_video,
+        'medals': int((rankings.get('medals', {}) or {}).get(uid, 0)),
+        'vote_given': int((rankings.get('vote_given', {}) or {}).get(uid, 0)),
+    })
+    return st
+
+
 def _prune(d: dict, maxn: int, ttl: int) -> dict:
     now = time.time()
     items = [(k, v) for k, v in d.items()
@@ -407,6 +443,18 @@ class JsonRankingStore(RankingStore):
     async def get_challenge(self):
         return self.data.get('challenge')
 
+    async def get_profile(self, user_id):
+        return _profile(self.data, self.data.get('votes', {}), user_id, _month_key())
+
+    async def incr_medal(self, user_id):
+        self.data.setdefault('medals', {})
+        uid = str(user_id)
+        self.data['medals'][uid] = int(self.data['medals'].get(uid, 0)) + 1
+        await asyncio.to_thread(self._save)
+
+    async def monthly_active_users(self):
+        return [int(k) for k in (self.data.get('monthly', {}) or {}).keys()]
+
 
 # ---------------------------------------------------------------------------
 # Backend: Firebase Firestore
@@ -500,6 +548,27 @@ class FirestoreRankingStore(RankingStore):
     async def get_challenge(self):
         data = await asyncio.to_thread(self._read)
         return data.get('challenge')
+
+    async def get_profile(self, user_id):
+        def _op():
+            rankings = self._read()
+            vsnap = self._votes.get()
+            votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
+            return _profile(rankings, votes, user_id, _month_key())
+        return await asyncio.to_thread(_op)
+
+    async def incr_medal(self, user_id):
+        def _op():
+            data = self._read()
+            medals = data.get('medals', {}) or {}
+            uid = str(user_id)
+            medals[uid] = int(medals.get(uid, 0)) + 1
+            self._doc.set({'medals': medals}, merge=True)
+        await asyncio.to_thread(_op)
+
+    async def monthly_active_users(self):
+        data = await asyncio.to_thread(self._read)
+        return [int(k) for k in (data.get('monthly', {}) or {}).keys()]
 
     async def get_earned(self, user_id):
         data = await asyncio.to_thread(self._read)

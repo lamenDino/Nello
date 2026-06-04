@@ -539,6 +539,34 @@ ACHIEVEMENTS = {
     'voter': '🗳️ <b>Votante attivo!</b> Hai messo un sacco di reazioni.',
 }
 
+# Ranghi/titoli in base ai contenuti totali (all-time)
+RANKS = [
+    (0, '🐣', 'Novizio'),
+    (10, '🎬', 'Habitué'),
+    (50, '🏅', 'Veterano'),
+    (100, '🔥', 'Esperto'),
+    (250, '💎', 'Maestro'),
+    (500, '🦅', 'Leggenda'),
+    (1000, '👑', 'Re del gruppo'),
+]
+
+
+def get_rank(alltime: int):
+    """Ritorna (emoji, titolo) del rango raggiunto."""
+    emoji, title = RANKS[0][1], RANKS[0][2]
+    for thr, e, t in RANKS:
+        if alltime >= thr:
+            emoji, title = e, t
+    return emoji, title
+
+
+def next_rank(alltime: int):
+    """Ritorna (soglia, emoji, titolo) del prossimo rango, o None se al massimo."""
+    for thr, e, t in RANKS:
+        if alltime < thr:
+            return thr, e, t
+    return None
+
 
 def newly_earned(totals: dict, already: set) -> list:
     """Ritorna i codici achievement appena sbloccati (non in `already`)."""
@@ -604,6 +632,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /votati — video più amati (reazioni)\n"
         "• /mensile — top del mese\n"
         "• /record — albo d'oro all-time\n"
+        "• /profilo — la tua card (rango, medaglie…)\n"
         "• /stats — le tue statistiche\n\n"
         f"Chat ID di questo gruppo: <code>{update.effective_chat.id}</code>",
         parse_mode=ParseMode.HTML,
@@ -668,12 +697,57 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     rank_txt = f"#{s['rank']} su {s['total_users']}" if s.get('rank') else "—"
     badges = " ".join(ACHIEVEMENTS.get(c, "🏅").split()[0] for c in earned) or "nessuno ancora"
+    r_emoji, r_title = get_rank(s['alltime'])
     text = (
         f"📊 <b>Le tue statistiche, {escape(u.first_name)}</b>\n\n"
+        f"{r_emoji} Rango: <b>{r_title}</b>\n"
         f"📆 Questa settimana: <b>{s['weekly']}</b>\n"
         f"🗓️ Questo mese: <b>{s['monthly']}</b>\n"
         f"🏛️ Totale: <b>{s['alltime']}</b>\n"
         f"🥇 Posizione all-time: <b>{rank_txt}</b>\n"
+        f"🎖️ Achievement: {badges}\n\n"
+        f"ℹ️ Usa /profilo per la card completa."
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def profilo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Card profilo: rango, progressione, voti ricevuti, medaglie, miglior video."""
+    u = update.effective_user
+    try:
+        p = await ranking_store.get_profile(u.id)
+    except Exception as e:
+        logger.warning(f"get_profile fallito: {e}")
+        await update.message.reply_text("⚠️ Profilo non disponibile: il database non è raggiungibile.")
+        return
+
+    r_emoji, r_title = get_rank(p['alltime'])
+    nxt = next_rank(p['alltime'])
+    if nxt:
+        manca = nxt[0] - p['alltime']
+        prog = f"⬆️ Mancano <b>{manca}</b> contenuti per diventare {nxt[1]} <b>{nxt[2]}</b>"
+    else:
+        prog = "🏆 Hai raggiunto il rango massimo!"
+
+    earned = []
+    try:
+        earned = await ranking_store.get_earned(u.id)
+    except Exception:
+        pass
+    badges = " ".join(ACHIEVEMENTS.get(c, "🏅").split()[0] for c in earned) or "—"
+    rank_txt = f"#{p['rank']} su {p['total_users']}" if p.get('rank') else "—"
+    medals = "🏅" * min(int(p.get('medals', 0)), 10) + (f" ×{p['medals']}" if p.get('medals') else " 0")
+
+    text = (
+        f"🪪 <b>PROFILO — {escape(u.first_name)}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"{r_emoji} <b>{r_title}</b>\n"
+        f"{prog}\n\n"
+        f"🏛️ Contenuti totali: <b>{p['alltime']}</b>  (pos. {rank_txt})\n"
+        f"🗓️ Questo mese: <b>{p['monthly']}</b>   📆 Settimana: <b>{p['weekly']}</b>\n"
+        f"👍 Voti ricevuti: <b>{p.get('votes_received', 0)}</b>  (🔥 miglior video: {p.get('best_video', 0)})\n"
+        f"🗳️ Reazioni date: <b>{p.get('vote_given', 0)}</b>\n"
+        f"🏅 Medaglie del pubblico: {medals}\n"
         f"🎖️ Achievement: {badges}"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -1362,6 +1436,10 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         v_mention = f'<a href="tg://user?id={v_id}">{escape(v_name)}</a>'
         text += (f"\n\n🏅 <b>Medaglia del pubblico</b>\n"
                  f"{v_mention} con <b>{v_count}</b> voti sui suoi video! 👏")
+        try:
+            await ranking_store.incr_medal(v_id)  # conta la medaglia nel profilo
+        except Exception:
+            pass
 
     text += f"\n\n📜 <i>{escape(aforisma)}</i>"
 
@@ -1426,6 +1504,42 @@ async def monthly_oscar(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.warning(f"Oscar mensile non inviato: {e}")
+
+
+async def monthly_wrapped(context: ContextTypes.DEFAULT_TYPE):
+    """Recap personale di fine mese, inviato in DM a chi è stato attivo.
+    Job giornaliero che agisce solo l'ultimo giorno del mese."""
+    now = datetime.now(pytz.timezone('Europe/Rome')) if pytz else datetime.now()
+    if (now + timedelta(days=1)).day != 1:
+        return
+    try:
+        users = await ranking_store.monthly_active_users()
+    except Exception:
+        users = []
+    mese = now.strftime('%B').capitalize()
+    sent = 0
+    for uid in users:
+        try:
+            p = await ranking_store.get_profile(uid)
+        except Exception:
+            continue
+        r_emoji, r_title = get_rank(p['alltime'])
+        best = f"\n🔥 Il tuo video più amato: <b>{p['best_video']}</b> reazioni" if p.get('best_video') else ""
+        text = (
+            f"🎁 <b>IL TUO {mese.upper()} su Nello!</b>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🗓️ Contenuti del mese: <b>{p['monthly']}</b>\n"
+            f"👍 Voti ricevuti nel mese: <b>{p.get('votes_received_month', 0)}</b>{best}\n"
+            f"🏛️ Totale all-time: <b>{p['alltime']}</b>\n"
+            f"{r_emoji} Rango: <b>{r_title}</b>\n\n"
+            f"Grazie per aver animato il gruppo! Ci vediamo il mese prossimo 🚀"
+        )
+        try:
+            await context.bot.send_message(chat_id=int(uid), text=text, parse_mode=ParseMode.HTML)
+            sent += 1
+        except Exception:
+            pass  # l'utente non ha mai avviato il bot in privato
+    logger.info(f"Wrapped mensile inviato a {sent}/{len(users)} utenti")
 
 
 async def weekly_redeploy(context: ContextTypes.DEFAULT_TYPE):
@@ -1586,6 +1700,7 @@ def main():
     application.add_handler(CommandHandler("mensile", mensile_cmd))
     application.add_handler(CommandHandler("record", record_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
+    application.add_handler(CommandHandler("profilo", profilo_cmd))
     application.add_handler(CommandHandler("votati", votati_cmd))
     application.add_handler(CommandHandler("setcookies", setcookies_cmd))
     application.add_handler(CommandHandler("chats", chats_cmd))
@@ -1610,6 +1725,12 @@ def main():
         monthly_oscar,
         time=time(hour=21, minute=0),
         chat_id=GROUP_CHAT_ID
+    )
+
+    # Wrapped personale di fine mese (DM): job giornaliero alle 21:30, agisce solo l'ultimo giorno.
+    application.job_queue.run_daily(
+        monthly_wrapped,
+        time=time(hour=21, minute=30),
     )
 
     # Post divertente giornaliero: DISATTIVATO di default (riattivabile con FUNNY_DAILY=1).
