@@ -27,6 +27,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    MessageReactionHandler,
     filters,
     ContextTypes,
 )
@@ -322,12 +323,12 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     try:
         kind = cached.get('kind')
         if kind == 'video':
-            vote_id = new_vote_id()
-            await context.bot.send_video(chat_id=msg.chat_id, video=cached['fid'],
-                                         caption=caption, parse_mode=ParseMode.HTML,
-                                         reply_markup=reaction_keyboard(url, vote_id))
+            _m = await context.bot.send_video(
+                chat_id=msg.chat_id, video=cached['fid'],
+                caption=caption + "\n💬 <i>Reagisci con un'emoji per votarlo!</i>",
+                parse_mode=ParseMode.HTML, reply_markup=audio_only_keyboard(url))
             try:
-                await ranking_store.create_vote(vote_id, msg.from_user.id,
+                await ranking_store.create_vote(f"{_m.chat_id}:{_m.message_id}", msg.from_user.id,
                                                 msg.from_user.full_name, fid=cached['fid'])
             except Exception:
                 pass
@@ -401,8 +402,15 @@ def _reaction_rows(vote_id: str, counts: dict = None):
     return [btns[i:i + 3] for i in range(0, len(btns), 3)]
 
 
+def audio_only_keyboard(url: str) -> InlineKeyboardMarkup:
+    """Solo il bottone 'Scarica audio'. Il voto avviene con le reazioni native."""
+    token = register_cb_url(url)
+    return InlineKeyboardMarkup([[InlineKeyboardButton(AUDIO_BTN_TEXT, callback_data=f"a:{token}")]])
+
+
 def reaction_keyboard(url: str, vote_id: str, counts: dict = None) -> InlineKeyboardMarkup:
-    """Tastiera sotto al video: riga Audio + righe reazioni."""
+    """Tastiera sotto al video: riga Audio + righe reazioni (LEGACY, non più usata:
+    ora il voto è tramite reazioni native di Telegram)."""
     token = register_cb_url(url)
     rows = [[InlineKeyboardButton(AUDIO_BTN_TEXT, callback_data=f"a:{token}")]]
     rows += _reaction_rows(vote_id, counts)
@@ -420,6 +428,46 @@ def rebuild_reaction_markup(audio_cb: str, vote_id: str, counts: dict) -> Inline
         rows.append([InlineKeyboardButton(AUDIO_BTN_TEXT, callback_data=audio_cb)])
     rows += _reaction_rows(vote_id, counts)
     return InlineKeyboardMarkup(rows)
+
+
+async def on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Voto tramite reazioni native di Telegram. Richiede che il bot sia admin nel
+    gruppo e che message_reaction sia tra gli allowed_updates."""
+    mr = update.message_reaction
+    if not mr or not mr.user:   # ignora reazioni anonime / aggiornamenti di conteggio
+        return
+    key = f"{mr.chat.id}:{mr.message_id}"
+    emojis = [getattr(rt, 'emoji', None) or '⭐' for rt in (mr.new_reaction or [])]
+    try:
+        res = await ranking_store.set_reaction(key, mr.user.id, emojis)
+    except Exception as e:
+        logger.warning(f"set_reaction fallito: {e}")
+        return
+    if not res or res.get('self'):
+        return
+
+    if res.get('milestone'):
+        try:
+            owner_m = f'<a href="tg://user?id={res["owner"]}">{escape(res["name"])}</a>'
+            await context.bot.send_message(
+                mr.chat.id,
+                f"🔥 Il video di {owner_m} ha raggiunto <b>{res['milestone']}</b> voti! 🎉",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+    if res.get('added') and res.get('voter_total') == VOTER_ACH_AT:
+        try:
+            await ranking_store.add_earned(mr.user.id, 'voter')
+            vm = f'<a href="tg://user?id={mr.user.id}">{escape(mr.user.first_name)}</a>'
+            await context.bot.send_message(
+                mr.chat.id,
+                f"🎉 {vm} ha sbloccato un achievement!\n{ACHIEVEMENTS.get('voter')}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1125,23 +1173,24 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # === VIDEO ===
             if info.get("type", "video") == "video":
-                _vote_id = new_vote_id()
+                video_caption = caption + "\n💬 <i>Reagisci con un'emoji per votarlo!</i>"
                 with open(info["file_path"], "rb") as f:
                     _m = await context.bot.send_video(
                         chat_id=msg.chat_id,
                         video=f,
-                        caption=caption,
+                        caption=video_caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=reaction_keyboard(url, _vote_id),
+                        reply_markup=audio_only_keyboard(url),
                     )
                 sent_ok = True
                 _fc = _fid_from_msg(_m)
                 if _fc:
                     captured.append(_fc)
-                # Crea il record voto col file_id (per il Video della Settimana)
+                # Rendi il messaggio votabile con le reazioni native (chiave = chat:msg_id)
                 try:
+                    vkey = f"{_m.chat_id}:{_m.message_id}"
                     await ranking_store.create_vote(
-                        _vote_id, msg.from_user.id, msg.from_user.full_name,
+                        vkey, msg.from_user.id, msg.from_user.full_name,
                         fid=(_fc[1] if _fc and _fc[0] == 'video' else None))
                 except Exception as e:
                     logger.warning(f"create_vote fallito: {e}")
@@ -1305,19 +1354,20 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await ranking_store.set_cached(key, payload)
                 except Exception as e:
                     logger.warning(f"Cache file_id: set fallito: {e}")
-                # Caroselli/foto: i media_group non accettano bottoni, quindi mettiamo
-                # le reazioni su un messaggio di follow-up (il video le ha già inline).
+                # Caroselli/foto: si vota reagendo a un messaggio di follow-up con
+                # un'emoji nativa (l'album è fatto di più messaggi, non votabile bene).
                 if info.get("type") == "carousel":
                     try:
-                        _vid = new_vote_id()
-                        await ranking_store.create_vote(_vid, msg.from_user.id, msg.from_user.full_name, fid=None)
-                        await context.bot.send_message(
+                        _vm = await context.bot.send_message(
                             chat_id=msg.chat_id,
-                            text="👇 Reagisci a questo post:",
-                            reply_markup=reaction_only_keyboard(_vid),
+                            text="💬 <b>Reagisci a QUESTO messaggio con un'emoji per votare il post!</b>",
+                            parse_mode=ParseMode.HTML,
                         )
+                        await ranking_store.create_vote(
+                            f"{_vm.chat_id}:{_vm.message_id}",
+                            msg.from_user.id, msg.from_user.full_name, fid=None)
                     except Exception as e:
-                        logger.warning(f"Reazioni carosello fallite: {e}")
+                        logger.warning(f"Voto carosello fallito: {e}")
                 try:
                     totals = await ranking_store.add_point(msg.from_user.id, msg.from_user.full_name)
                     # Registra il link per il "già postato"
@@ -1733,6 +1783,7 @@ def main():
     application.add_handler(CommandHandler("chats", chats_cmd))
     application.add_handler(CommandHandler("sfida", sfida_cmd))
     application.add_handler(CallbackQueryHandler(on_callback))
+    application.add_handler(MessageReactionHandler(on_reaction))
     # File inviato dall'admin per /setcookies
     application.add_handler(MessageHandler(filters.Document.ALL, on_document))
     # Log all text messages first to verify visibility
@@ -1791,6 +1842,7 @@ def main():
                 url_path=WEBHOOK_PATH,
                 webhook_url=WEBHOOK_URL,
                 drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,  # include le reazioni native
             )
         except Exception as e:
             logger.error(f"Failed to start webhook mode: {e}")
@@ -1798,7 +1850,8 @@ def main():
         # Start a minimal health webserver for Render and run polling
         threading.Thread(target=start_webserver, daemon=True).start()
         logger.info("Starting polling...")
-        application.run_polling(drop_pending_updates=False)
+        # allowed_updates=ALL_TYPES: necessario per ricevere le reazioni (message_reaction)
+        application.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     try:

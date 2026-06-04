@@ -95,6 +95,9 @@ class RankingStore:
     async def toggle_reaction(self, vote_id, voter_id, emoji) -> Optional[Dict]:
         raise NotImplementedError
 
+    async def set_reaction(self, key, voter_id, new_emojis) -> Optional[Dict]:
+        raise NotImplementedError
+
     async def top_voted_week(self, limit: int = 3) -> List[Tuple[int, int, str]]:
         raise NotImplementedError
 
@@ -234,6 +237,50 @@ def _toggle_reaction(votes: dict, rankings: dict, vote_id: str, voter_id, emoji:
         'name': rec.get('n', 'Utente'), 'added': added, 'milestone': milestone,
         'voter_total': int(rankings.get('vote_given', {}).get(vid, 0)),
     }
+
+
+def _set_reaction(votes: dict, rankings: dict, key: str, voter_id, new_emojis):
+    """Imposta la reazione di un utente a un video (stato ASSOLUTO, dalle reazioni
+    native di Telegram). new_emojis = lista emoji attuali dell'utente (di solito 0 o 1)."""
+    rec = votes.get(key)
+    if not rec:
+        return None
+    owner = str(rec.get('o'))
+    if owner == str(voter_id):
+        return {'self': True}
+    u = rec.setdefault('u', {})
+    r = rec.setdefault('r', {})
+    vid = str(voter_id)
+    prev = u.get(vid)
+    new = new_emojis[0] if new_emojis else None
+    if prev == new:
+        return {'owner': int(owner), 'name': rec.get('n', 'Utente'), 'total': int(rec.get('c', 0)),
+                'added': False, 'milestone': None, 'voter_total': 0}
+    had, has = prev is not None, new is not None
+    if had:
+        r[prev] = max(0, int(r.get(prev, 1)) - 1)
+    if has:
+        u[vid] = new
+        r[new] = int(r.get(new, 0)) + 1
+    else:
+        u.pop(vid, None)
+    owner_delta = 1 if (has and not had) else (-1 if (had and not has) else 0)
+    rec['c'] = max(0, int(rec.get('c', 0)) + owner_delta)
+    rec['r'] = {k: v for k, v in r.items() if v > 0}
+    vw = rankings.setdefault('vote_week', {})
+    vw[owner] = max(0, int(vw.get(owner, 0)) + owner_delta)
+    added = has and not had
+    milestone = None
+    if added:
+        vg = rankings.setdefault('vote_given', {})
+        vg[vid] = int(vg.get(vid, 0)) + 1
+        ms = rec.setdefault('ms', [])
+        if rec['c'] in MILESTONES_V and rec['c'] not in ms:
+            ms.append(rec['c'])
+            milestone = rec['c']
+    return {'owner': int(owner), 'name': rec.get('n', 'Utente'), 'total': rec['c'],
+            'added': added, 'milestone': milestone,
+            'voter_total': int(rankings.get('vote_given', {}).get(vid, 0))}
 
 
 def _top_voted(rankings: dict, limit: int):
@@ -424,6 +471,13 @@ class JsonRankingStore(RankingStore):
             await asyncio.to_thread(self._save)
         return res
 
+    async def set_reaction(self, key, voter_id, new_emojis):
+        self.data.setdefault('votes', {})
+        res = _set_reaction(self.data['votes'], self.data, key, voter_id, new_emojis)
+        if res and not res.get('self'):
+            await asyncio.to_thread(self._save)
+        return res
+
     async def top_voted_week(self, limit=3):
         return _top_voted(self.data, limit)
 
@@ -509,6 +563,22 @@ class FirestoreRankingStore(RankingStore):
             rsnap = self._doc.get()
             rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
             res = _toggle_reaction(votes, rankings, vote_id, voter_id, emoji)
+            if res and not res.get('self'):
+                self._votes.set(votes)
+                self._doc.set({
+                    'vote_week': rankings.get('vote_week', {}),
+                    'vote_given': rankings.get('vote_given', {}),
+                }, merge=True)
+            return res
+        return await asyncio.to_thread(_op)
+
+    async def set_reaction(self, key, voter_id, new_emojis):
+        def _op():
+            vsnap = self._votes.get()
+            votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
+            rsnap = self._doc.get()
+            rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
+            res = _set_reaction(votes, rankings, key, voter_id, new_emojis)
             if res and not res.get('self'):
                 self._votes.set(votes)
                 self._doc.set({
