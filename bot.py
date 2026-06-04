@@ -385,6 +385,15 @@ def reaction_keyboard(url: str, vote_id: str, counts: dict = None) -> InlineKeyb
     return InlineKeyboardMarkup([row1, row2])
 
 
+def reaction_only_keyboard(vote_id: str, counts: dict = None) -> InlineKeyboardMarkup:
+    """Solo reazioni (per i caroselli: i media_group non accettano bottoni,
+    quindi le mettiamo su un messaggio di follow-up)."""
+    counts = counts or {}
+    row = [InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
+           for i, e in enumerate(REACTIONS)]
+    return InlineKeyboardMarkup([row])
+
+
 def rebuild_reaction_markup(audio_cb: str, vote_id: str, counts: dict) -> InlineKeyboardMarkup:
     rows = []
     if audio_cb:
@@ -1195,6 +1204,19 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await ranking_store.set_cached(key, payload)
                 except Exception as e:
                     logger.warning(f"Cache file_id: set fallito: {e}")
+                # Caroselli/foto: i media_group non accettano bottoni, quindi mettiamo
+                # le reazioni su un messaggio di follow-up (il video le ha già inline).
+                if info.get("type") == "carousel":
+                    try:
+                        _vid = new_vote_id()
+                        await ranking_store.create_vote(_vid, msg.from_user.id, msg.from_user.full_name, fid=None)
+                        await context.bot.send_message(
+                            chat_id=msg.chat_id,
+                            text="👇 Reagisci a questo post:",
+                            reply_markup=reaction_only_keyboard(_vid),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Reazioni carosello fallite: {e}")
                 try:
                     totals = await ranking_store.add_point(msg.from_user.id, msg.from_user.full_name)
                     # Registra il link per il "già postato"

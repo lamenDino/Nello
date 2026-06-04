@@ -759,7 +759,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                         'success': True,
                         'type': 'carousel',
                         'files': files,
-                        'title': 'Contenuto',
+                        'title': getattr(self, 'last_fallback_title', None) or 'Contenuto',
                         'uploader': 'Sconosciuto',
                         'platform': platform,
                         'url': clean_url

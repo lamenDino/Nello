@@ -193,15 +193,19 @@ class TikTokMixin:
                     except Exception:
                         pass
 
-                # Parse robusto recursive per trovare liste di url
+                # Parse robusto recursive. IMPORTANTE: ogni slide ha un 'urlList' con
+                # piu' URL mirror della STESSA immagine -> prendiamo solo il PRIMO,
+                # altrimenti il carosello esce con immagini duplicate.
                 def recursive_find_images(d):
                     if isinstance(d, dict):
-                        # Pattern trovati in struttur tiktok
-                        if 'imageURL' in d and 'urlList' in d['imageURL']:
-                             urls.extend(d['imageURL']['urlList'])
-                        if 'displayImage' in d and 'urlList' in d['displayImage']:
-                             urls.extend(d['displayImage']['urlList'])
-                        
+                        img = None
+                        if isinstance(d.get('imageURL'), dict) and d['imageURL'].get('urlList'):
+                            img = d['imageURL']['urlList']
+                        elif isinstance(d.get('displayImage'), dict) and d['displayImage'].get('urlList'):
+                            img = d['displayImage']['urlList']
+                        if img:
+                            urls.append(img[0])  # una sola immagine per slide
+
                         for k, v in d.items():
                             recursive_find_images(v)
                     elif isinstance(d, list):
