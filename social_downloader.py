@@ -153,6 +153,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         self.max_retries = 3
         self.retry_delay = 2
+        # YouTube: durata massima (secondi) oltre la quale NON si scarica (si lascia il link)
+        self.youtube_max_duration = int(os.getenv('YOUTUBE_MAX_DURATION', '180'))
         self.debug = bool(debug)
         self._last_info = None
         if self.debug:
@@ -790,6 +792,14 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 # Uploader/title (fallbacks)
                 uploader = info.get('uploader') or info.get('channel') or info.get('creator') or 'Sconosciuto'
                 title = info.get('title') or 'Contenuto'
+
+                # YouTube: scarica solo i video <= 3 minuti; quelli più lunghi
+                # vengono lasciati come link in chat (skip_long).
+                if platform == 'youtube':
+                    dur = info.get('duration') or 0
+                    if dur and dur > self.youtube_max_duration:
+                        logger.info(f"YouTube {dur}s > {self.youtube_max_duration}s: lasciato come link.")
+                        return {'success': False, 'skip_long': True}
 
                 # 1) Se è carosello/playlist -> prova a scaricare immagini/video
                 if self._is_playlist_like(info):

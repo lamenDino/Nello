@@ -150,10 +150,8 @@ def is_supported_link(url: str) -> bool:
     if not is_supported:
         return False
 
-    # Restrict YouTube to Shorts only
-    if "youtube.com" in url or "youtu.be" in url:
-        return "/shorts/" in url
-
+    # YouTube: accettiamo tutti i video, ma quelli > 3 min vengono lasciati come link
+    # in chat (il controllo durata è gestito nel downloader -> 'skip_long').
     return True
 
 def detect_platform(url: str) -> str:
@@ -228,8 +226,24 @@ def _human(n) -> str:
     return str(n)
 
 
-def _meta_line(info: dict) -> str:
-    """Riga opzionale con durata/views/like/autore, se disponibili."""
+def _clean_title(raw: str, uploader: str = None) -> str:
+    """Ripulisce il titolo da info ridondanti che alcune piattaforme (es. Facebook)
+    incollano dentro: prefisso 'NN views · NN reactions |' e suffisso '| Autore'."""
+    if not raw:
+        return raw
+    import re
+    t = raw
+    # Prefisso tipo "69K views · 832 reactions | ..." (Facebook)
+    t = re.sub(r'^\s*[\d.,]+\s*[KMB]?\s*views?\b.*?\|\s*', '', t, flags=re.IGNORECASE)
+    # Suffisso "| Autore" se coincide con l'uploader (evita di ripeterlo)
+    if uploader and str(uploader).lower() not in ('sconosciuto', 'none', ''):
+        t = re.sub(r'\s*\|\s*' + re.escape(str(uploader)) + r'\s*$', '', t, flags=re.IGNORECASE)
+    return t.strip(' |\n')
+
+
+def _meta_line(info: dict, title: str = '') -> str:
+    """Riga opzionale con durata/views/like/autore, se disponibili.
+    Salta l'autore se già presente nel titolo (per non ripeterlo)."""
     bits = []
     d = _fmt_duration(info.get('duration'))
     if d:
@@ -242,7 +256,8 @@ def _meta_line(info: dict) -> str:
         bits.append(f"❤️ {likes}")
     up = info.get('uploader') or info.get('channel')
     if up and str(up).lower() not in ('sconosciuto', 'none', ''):
-        bits.append(f"✍️ {escape(str(up)[:40])}")
+        if str(up).lower() not in (title or '').lower():
+            bits.append(f"✍️ {escape(str(up)[:40])}")
     return "  ".join(bits)
 
 
@@ -256,13 +271,14 @@ def build_caption(info: dict, url: str, sender_name: str, raw_title: str, sender
         sender = f'<a href="tg://user?id={sender_id}">{escape(sender_name)}</a>'
     else:
         sender = escape(sender_name)
+    clean_title = _clean_title(raw_title, info.get('uploader') or info.get('channel')) or raw_title
     caption = (
         f"{icon_main} <b>{label} da:</b> {detect_platform(url)}\n"
         f"{random.choice(ICONS_USER)} <b>{label} {inviato} da:</b> {sender}\n"
         f"{random.choice(ICONS_LINK)} <b>Link originale:</b> {escape(url)}\n"
-        f"{random.choice(ICONS_META)} <b>Info:</b> {escape(raw_title)}"
+        f"{random.choice(ICONS_META)} <b>Info:</b> {escape(clean_title)}"
     )
-    meta = _meta_line(info)
+    meta = _meta_line(info, clean_title)
     if meta:
         caption += f"\n📊 {meta}"
     return caption
@@ -361,8 +377,10 @@ def register_cb_url(url: str) -> str:
     return token
 
 
-# Reazioni disponibili (l'indice è usato nel callback_data per stare nei 64 byte)
-REACTIONS = ['👍', '😂', '🔥', '😍']
+# Reazioni disponibili (l'indice è usato nel callback_data per stare nei 64 byte).
+# NB: aggiungere SOLO in coda, per non sfasare i callback dei messaggi vecchi.
+REACTIONS = ['👍', '😂', '🔥', '😍', '😭', '🤮']
+AUDIO_BTN_TEXT = "🎵 Scarica audio"
 VOTER_ACH_AT = 25  # reazioni date per sbloccare "Votante attivo"
 
 
@@ -375,31 +393,32 @@ def _react_label(emoji: str, count: int) -> str:
     return f"{emoji} {count}" if count else emoji
 
 
-def reaction_keyboard(url: str, vote_id: str, counts: dict = None) -> InlineKeyboardMarkup:
-    """Tastiera sotto al video: riga Audio + riga reazioni."""
+def _reaction_rows(vote_id: str, counts: dict = None):
+    """Bottoni reazione disposti su righe da 3 (per non stringerli troppo)."""
     counts = counts or {}
-    token = register_cb_url(url)
-    row1 = [InlineKeyboardButton("🎵 Audio", callback_data=f"a:{token}")]
-    row2 = [InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
+    btns = [InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
             for i, e in enumerate(REACTIONS)]
-    return InlineKeyboardMarkup([row1, row2])
+    return [btns[i:i + 3] for i in range(0, len(btns), 3)]
+
+
+def reaction_keyboard(url: str, vote_id: str, counts: dict = None) -> InlineKeyboardMarkup:
+    """Tastiera sotto al video: riga Audio + righe reazioni."""
+    token = register_cb_url(url)
+    rows = [[InlineKeyboardButton(AUDIO_BTN_TEXT, callback_data=f"a:{token}")]]
+    rows += _reaction_rows(vote_id, counts)
+    return InlineKeyboardMarkup(rows)
 
 
 def reaction_only_keyboard(vote_id: str, counts: dict = None) -> InlineKeyboardMarkup:
-    """Solo reazioni (per i caroselli: i media_group non accettano bottoni,
-    quindi le mettiamo su un messaggio di follow-up)."""
-    counts = counts or {}
-    row = [InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
-           for i, e in enumerate(REACTIONS)]
-    return InlineKeyboardMarkup([row])
+    """Solo reazioni (per i caroselli: i media_group non accettano bottoni inline)."""
+    return InlineKeyboardMarkup(_reaction_rows(vote_id, counts))
 
 
 def rebuild_reaction_markup(audio_cb: str, vote_id: str, counts: dict) -> InlineKeyboardMarkup:
     rows = []
     if audio_cb:
-        rows.append([InlineKeyboardButton("🎵 Audio", callback_data=audio_cb)])
-    rows.append([InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
-                 for i, e in enumerate(REACTIONS)])
+        rows.append([InlineKeyboardButton(AUDIO_BTN_TEXT, callback_data=audio_cb)])
+    rows += _reaction_rows(vote_id, counts)
     return InlineKeyboardMarkup(rows)
 
 
@@ -1007,6 +1026,14 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
+                try:
+                    await loading.delete()
+                except Exception:
+                    pass
+                continue
+
+            # ⏭️ YouTube troppo lungo: lascia il link in chat senza dire nulla
+            if info and info.get("skip_long"):
                 try:
                     await loading.delete()
                 except Exception:
