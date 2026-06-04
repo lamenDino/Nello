@@ -13,7 +13,7 @@ import threading
 import asyncio
 import random
 import pytz
-from datetime import time, datetime
+from datetime import time, datetime, timedelta
 from collections import defaultdict
 
 from aiohttp import web
@@ -306,9 +306,15 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     try:
         kind = cached.get('kind')
         if kind == 'video':
+            vote_id = new_vote_id()
             await context.bot.send_video(chat_id=msg.chat_id, video=cached['fid'],
                                          caption=caption, parse_mode=ParseMode.HTML,
-                                         reply_markup=await make_video_keyboard(url, msg.from_user.id, msg.from_user.full_name))
+                                         reply_markup=reaction_keyboard(url, vote_id))
+            try:
+                await ranking_store.create_vote(vote_id, msg.from_user.id,
+                                                msg.from_user.full_name, fid=cached['fid'])
+            except Exception:
+                pass
         elif kind in ('photo', 'animation', 'document'):
             send = {'photo': context.bot.send_photo, 'animation': context.bot.send_animation,
                     'document': context.bot.send_document}[kind]
@@ -355,44 +361,63 @@ def register_cb_url(url: str) -> str:
     return token
 
 
-def vote_label(count: int) -> str:
-    return "👍 Vota" if not count else f"👍 {count}"
+# Reazioni disponibili (l'indice è usato nel callback_data per stare nei 64 byte)
+REACTIONS = ['👍', '😂', '🔥', '😍']
+VOTER_ACH_AT = 25  # reazioni date per sbloccare "Votante attivo"
 
 
-async def make_video_keyboard(url: str, owner_id: int, owner_name: str) -> InlineKeyboardMarkup:
-    """Tastiera sotto al video: Audio + Voto. Crea il record voto su Firestore."""
+def new_vote_id() -> str:
     import uuid
+    return uuid.uuid4().hex[:12]
+
+
+def _react_label(emoji: str, count: int) -> str:
+    return f"{emoji} {count}" if count else emoji
+
+
+def reaction_keyboard(url: str, vote_id: str, counts: dict = None) -> InlineKeyboardMarkup:
+    """Tastiera sotto al video: riga Audio + riga reazioni."""
+    counts = counts or {}
     token = register_cb_url(url)
-    vote_id = uuid.uuid4().hex[:12]
-    try:
-        await ranking_store.create_vote(vote_id, owner_id, owner_name)
-    except Exception as e:
-        logger.warning(f"create_vote fallito: {e}")
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎵 Audio", callback_data=f"a:{token}"),
-        InlineKeyboardButton(vote_label(0), callback_data=f"v:{vote_id}"),
-    ]])
+    row1 = [InlineKeyboardButton("🎵 Audio", callback_data=f"a:{token}")]
+    row2 = [InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
+            for i, e in enumerate(REACTIONS)]
+    return InlineKeyboardMarkup([row1, row2])
+
+
+def rebuild_reaction_markup(audio_cb: str, vote_id: str, counts: dict) -> InlineKeyboardMarkup:
+    rows = []
+    if audio_cb:
+        rows.append([InlineKeyboardButton("🎵 Audio", callback_data=audio_cb)])
+    rows.append([InlineKeyboardButton(_react_label(e, counts.get(e, 0)), callback_data=f"r:{vote_id}:{i}")
+                 for i, e in enumerate(REACTIONS)])
+    return InlineKeyboardMarkup(rows)
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
 
-    if data.startswith("v:"):
-        vote_id = data[2:]
+    if data.startswith("r:"):
         try:
-            res = await ranking_store.toggle_vote(vote_id, q.from_user.id)
+            _, vote_id, idx = data.split(":")
+            emoji = REACTIONS[int(idx)]
+        except (ValueError, IndexError):
+            await q.answer()
+            return
+        try:
+            res = await ranking_store.toggle_reaction(vote_id, q.from_user.id, emoji)
         except Exception as e:
-            logger.warning(f"toggle_vote fallito: {e}")
-            await q.answer("Voto non riuscito, riprova.", show_alert=True)
+            logger.warning(f"toggle_reaction fallito: {e}")
+            await q.answer("Reazione non riuscita, riprova.", show_alert=True)
             return
         if res is None:
-            await q.answer("Questo video è troppo vecchio per votarlo 🙈", show_alert=True)
+            await q.answer("Questo video è troppo vecchio per reagire 🙈", show_alert=True)
             return
         if res.get('self'):
             await q.answer("Non puoi votare il tuo stesso video 😄", show_alert=True)
             return
-        # Aggiorna il contatore sul bottone, mantenendo il bottone Audio
+        # Aggiorna i contatori sui bottoni, mantenendo il bottone Audio
         try:
             audio_cb = None
             rows = q.message.reply_markup.inline_keyboard if (q.message and q.message.reply_markup) else []
@@ -400,14 +425,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for b in row:
                     if b.callback_data and b.callback_data.startswith('a:'):
                         audio_cb = b.callback_data
-            btns = []
-            if audio_cb:
-                btns.append(InlineKeyboardButton("🎵 Audio", callback_data=audio_cb))
-            btns.append(InlineKeyboardButton(vote_label(res['count']), callback_data=f"v:{vote_id}"))
-            await q.edit_message_reply_markup(InlineKeyboardMarkup([btns]))
+            await q.edit_message_reply_markup(rebuild_reaction_markup(audio_cb, vote_id, res.get('counts', {})))
         except Exception:
             pass
-        await q.answer("👍 Votato!" if res.get('voted') else "Voto rimosso")
+        await q.answer("✅" if res.get('added') else "Aggiornato")
+
+        # Notifica traguardo
+        if res.get('milestone'):
+            try:
+                owner_m = f'<a href="tg://user?id={res["owner"]}">{escape(res["name"])}</a>'
+                await context.bot.send_message(
+                    q.message.chat_id,
+                    f"🔥 Il video di {owner_m} ha raggiunto <b>{res['milestone']}</b> reazioni! 🎉",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+
+        # Achievement "Votante attivo" per chi vota tanto
+        if res.get('added') and res.get('voter_total') == VOTER_ACH_AT:
+            try:
+                await ranking_store.add_earned(q.from_user.id, 'voter')
+                voter_m = f'<a href="tg://user?id={q.from_user.id}">{escape(q.from_user.first_name)}</a>'
+                await context.bot.send_message(
+                    q.message.chat_id,
+                    f"🎉 {voter_m} ha sbloccato un achievement!\n{ACHIEVEMENTS.get('voter')}",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
         return
 
     if data.startswith("a:"):
@@ -481,6 +527,7 @@ ACHIEVEMENTS = {
     'm500': '💎 <b>500 contenuti!</b> Macchina da download.',
     'm1000': '👑 <b>1000 contenuti!</b> Il Re assoluto.',
     'night': '🦉 <b>Nottambulo!</b> Download nel cuore della notte.',
+    'voter': '🗳️ <b>Votante attivo!</b> Hai messo un sacco di reazioni.',
 }
 
 
@@ -544,7 +591,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Ciao! Mandami un link da TikTok, Instagram, Facebook, YouTube Shorts, "
         "Twitter/X, Reddit o Twitch e penso io a tutto 🔥\n\n"
         "<b>Comandi:</b>\n"
-        "• /classifica — top della settimana\n"
+        "• /classifica — top download della settimana\n"
+        "• /votati — video più amati (reazioni)\n"
         "• /mensile — top del mese\n"
         "• /record — albo d'oro all-time\n"
         "• /stats — le tue statistiche\n\n"
@@ -620,6 +668,25 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎖️ Achievement: {badges}"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def votati_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Classifica live dei video più votati (reazioni) della settimana."""
+    try:
+        board = await ranking_store.top_voted_week(limit=10)
+    except Exception as e:
+        logger.warning(f"top_voted_week fallito: {e}")
+        await update.message.reply_text("⚠️ Classifica voti non disponibile: database non raggiungibile.")
+        return
+    if not board:
+        await update.message.reply_text("📭 Nessun voto questa settimana. Reagite ai video! 👍🔥")
+        return
+    text = "👍 <b>VIDEO PIÙ AMATI (settimana)</b>\n\n"
+    for i, (user_id, count, name) in enumerate(board):
+        badge = BADGES[i] if i < len(BADGES) else f"<b>{i + 1}.</b>"
+        mention = f'<a href="tg://user?id={user_id}">{escape(name)}</a>'
+        text += f"{badge} {mention} — <b>{count}</b> voti\n"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 # =========================
@@ -755,6 +822,29 @@ async def chats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = escape(str(c.get('title') or c.get('id')))
         text += f"• {title} — <b>{c.get('count', 0)}</b> download\n"
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def sfida_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: lancia una sfida a tema per la settimana."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("🔒 Solo l'admin può lanciare una sfida.")
+        return
+    theme = " ".join(context.args or []).strip()
+    if not theme:
+        await update.message.reply_text("Uso: <code>/sfida &lt;tema&gt;</code>\nEs: <code>/sfida il video più assurdo</code>", parse_mode=ParseMode.HTML)
+        return
+    try:
+        await ranking_store.set_challenge(theme, update.effective_user.full_name)
+    except Exception as e:
+        logger.warning(f"set_challenge fallito: {e}")
+        await update.message.reply_text("⚠️ Non riesco a salvare la sfida (database).")
+        return
+    await update.message.reply_text(
+        f"🎯 <b>NUOVA SFIDA DELLA SETTIMANA!</b>\n\n«{escape(theme)}»\n\n"
+        f"Postate i vostri video e fateli votare con 👍😂🔥😍 — "
+        f"il più amato vince la <b>🏅 Medaglia del pubblico</b> sabato sera!",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 # =========================
@@ -925,18 +1015,26 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # === VIDEO ===
             if info.get("type", "video") == "video":
+                _vote_id = new_vote_id()
                 with open(info["file_path"], "rb") as f:
                     _m = await context.bot.send_video(
                         chat_id=msg.chat_id,
                         video=f,
                         caption=caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=await make_video_keyboard(url, msg.from_user.id, msg.from_user.full_name),
+                        reply_markup=reaction_keyboard(url, _vote_id),
                     )
                 sent_ok = True
                 _fc = _fid_from_msg(_m)
                 if _fc:
                     captured.append(_fc)
+                # Crea il record voto col file_id (per il Video della Settimana)
+                try:
+                    await ranking_store.create_vote(
+                        _vote_id, msg.from_user.id, msg.from_user.full_name,
+                        fid=(_fc[1] if _fc and _fc[0] == 'video' else None))
+                except Exception as e:
+                    logger.warning(f"create_vote fallito: {e}")
                 try:
                     os.remove(info["file_path"])
                 except Exception:
@@ -1224,6 +1322,14 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         else:
             text += f"{badge} — <b>0</b> video\n"
 
+    # 🎯 Sfida della settimana (se impostata)
+    try:
+        challenge = await ranking_store.get_challenge()
+    except Exception:
+        challenge = None
+    if challenge and challenge.get('t'):
+        text += f"\n\n🎯 <b>Sfida della settimana:</b> «{escape(str(challenge['t']))}»"
+
     # 🏅 Medaglia del pubblico: utente con più voti ricevuti sui propri video
     try:
         voted = await ranking_store.top_voted_week(limit=1)
@@ -1243,7 +1349,61 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
+    # 🏆 Video della Settimana: rimanda il video più reagito (via file_id, senza riscaricare)
+    try:
+        tv = await ranking_store.top_video_week()
+    except Exception:
+        tv = None
+    if tv and tv.get('fid'):
+        try:
+            tv_mention = f'<a href="tg://user?id={tv["owner"]}">{escape(tv["name"])}</a>'
+            reazioni = "  ".join(f"{e} {c}" for e, c in (tv.get('r') or {}).items()) or f"{tv['c']} reazioni"
+            await context.bot.send_video(
+                chat_id=chat_id, video=tv['fid'],
+                caption=f"🏆 <b>VIDEO DELLA SETTIMANA</b>\nDi {tv_mention} — {reazioni} 🎉",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            logger.warning(f"Video della settimana non inviato: {e}")
+
     await ranking_store.reset_weekly()
+
+
+async def monthly_oscar(context: ContextTypes.DEFAULT_TYPE):
+    """Premiazione di fine mese. Job giornaliero che scatta solo l'ultimo giorno del mese
+    (così i dati del mese corrente sono ancora intatti)."""
+    now = datetime.now(pytz.timezone('Europe/Rome')) if pytz else datetime.now()
+    domani = now + timedelta(days=1)
+    if domani.day != 1:
+        return  # non è l'ultimo giorno del mese
+
+    try:
+        dl_board = await ranking_store.get_board('monthly', limit=3)
+    except Exception:
+        dl_board = []
+    try:
+        vote_board = await ranking_store.top_voted_month(limit=3)
+    except Exception:
+        vote_board = []
+    if not dl_board and not vote_board:
+        return
+
+    text = "🏆🎬 <b>GLI OSCAR DEL MESE</b> 🎬🏆\n"
+    if dl_board:
+        text += "\n📥 <b>Più attivo</b>\n"
+        for i, (uid, c, n) in enumerate(dl_board):
+            badge = BADGES[i] if i < len(BADGES) else '•'
+            text += f"{badge} <a href='tg://user?id={uid}'>{escape(n)}</a> — <b>{c}</b> contenuti\n"
+    if vote_board:
+        text += "\n👑 <b>Più amato</b>\n"
+        for i, (uid, c, n) in enumerate(vote_board):
+            badge = BADGES[i] if i < len(BADGES) else '•'
+            text += f"{badge} <a href='tg://user?id={uid}'>{escape(n)}</a> — <b>{c}</b> voti\n"
+    text += "\n👏 Complimenti a tutti, ci vediamo il mese prossimo!"
+    try:
+        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(f"Oscar mensile non inviato: {e}")
 
 
 async def weekly_redeploy(context: ContextTypes.DEFAULT_TYPE):
@@ -1404,8 +1564,10 @@ def main():
     application.add_handler(CommandHandler("mensile", mensile_cmd))
     application.add_handler(CommandHandler("record", record_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
+    application.add_handler(CommandHandler("votati", votati_cmd))
     application.add_handler(CommandHandler("setcookies", setcookies_cmd))
     application.add_handler(CommandHandler("chats", chats_cmd))
+    application.add_handler(CommandHandler("sfida", sfida_cmd))
     application.add_handler(CallbackQueryHandler(on_callback))
     # File inviato dall'admin per /setcookies
     application.add_handler(MessageHandler(filters.Document.ALL, on_document))
@@ -1418,6 +1580,13 @@ def main():
         weekly_ranking,
         time=time(hour=20, minute=0),
         days=(6,),
+        chat_id=GROUP_CHAT_ID
+    )
+
+    # Oscar di fine mese: job giornaliero alle 21:00 che agisce solo l'ultimo giorno del mese.
+    application.job_queue.run_daily(
+        monthly_oscar,
+        time=time(hour=21, minute=0),
         chat_id=GROUP_CHAT_ID
     )
 

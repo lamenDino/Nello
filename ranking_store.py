@@ -89,13 +89,28 @@ class RankingStore:
     async def get_chats(self) -> List[Dict]:
         raise NotImplementedError
 
-    async def create_vote(self, vote_id: str, owner_id: int, owner_name: str) -> None:
+    async def create_vote(self, vote_id, owner_id, owner_name, fid=None) -> None:
         raise NotImplementedError
 
-    async def toggle_vote(self, vote_id: str, voter_id: int) -> Optional[Dict]:
+    async def toggle_reaction(self, vote_id, voter_id, emoji) -> Optional[Dict]:
         raise NotImplementedError
 
     async def top_voted_week(self, limit: int = 3) -> List[Tuple[int, int, str]]:
+        raise NotImplementedError
+
+    async def top_video_week(self) -> Optional[Dict]:
+        raise NotImplementedError
+
+    async def top_voted_month(self, limit: int = 3) -> List[Tuple[int, int, str]]:
+        raise NotImplementedError
+
+    async def get_vote_given(self, user_id: int) -> int:
+        raise NotImplementedError
+
+    async def set_challenge(self, theme: str, by: str) -> None:
+        raise NotImplementedError
+
+    async def get_challenge(self) -> Optional[Dict]:
         raise NotImplementedError
 
 
@@ -154,30 +169,62 @@ def _user_stats(data: dict, user_id: int) -> Dict:
     }
 
 
-def _create_vote(votes: dict, vote_id: str, owner_id, owner_name: str):
-    votes[vote_id] = {'o': str(owner_id), 'n': owner_name or 'Utente', 'v': [], 'c': 0, 't': time.time()}
+# Soglie traguardo reazioni su un singolo video
+MILESTONES_V = [5, 10, 25, 50, 100, 250]
 
 
-def _toggle_vote(votes: dict, rankings: dict, vote_id: str, voter_id):
+def _create_vote(votes: dict, vote_id: str, owner_id, owner_name: str, fid=None):
+    votes[vote_id] = {'o': str(owner_id), 'n': owner_name or 'Utente', 'fid': fid,
+                      'u': {}, 'r': {}, 'c': 0, 'ms': [], 't': time.time()}
+
+
+def _toggle_reaction(votes: dict, rankings: dict, vote_id: str, voter_id, emoji: str):
     rec = votes.get(vote_id)
     if not rec:
         return None  # record perso (video troppo vecchio)
     owner = str(rec.get('o'))
     if owner == str(voter_id):
         return {'self': True}
-    voters = rec.setdefault('v', [])
+    u = rec.setdefault('u', {})   # user_id -> emoji scelta
+    r = rec.setdefault('r', {})   # emoji -> conteggio
     vid = str(voter_id)
-    if vid in voters:
-        voters.remove(vid)
+    prev = u.get(vid)
+    added = False
+    owner_delta = 0
+    if prev == emoji:                      # toglie la reazione
+        u.pop(vid, None)
+        r[emoji] = max(0, int(r.get(emoji, 1)) - 1)
         rec['c'] = max(0, int(rec.get('c', 1)) - 1)
-        delta, voted = -1, False
-    else:
-        voters.append(vid)
+        owner_delta = -1
+    elif prev is not None:                 # cambia emoji (totale invariato)
+        r[prev] = max(0, int(r.get(prev, 1)) - 1)
+        u[vid] = emoji
+        r[emoji] = int(r.get(emoji, 0)) + 1
+    else:                                  # nuova reazione
+        u[vid] = emoji
+        r[emoji] = int(r.get(emoji, 0)) + 1
         rec['c'] = int(rec.get('c', 0)) + 1
-        delta, voted = 1, True
+        owner_delta = 1
+        added = True
+    rec['r'] = {k: v for k, v in r.items() if v > 0}  # pulisci gli zeri
+
     vw = rankings.setdefault('vote_week', {})
-    vw[owner] = max(0, int(vw.get(owner, 0)) + delta)
-    return {'count': rec['c'], 'owner': owner, 'name': rec.get('n', 'Utente'), 'voted': voted}
+    vw[owner] = max(0, int(vw.get(owner, 0)) + owner_delta)
+
+    milestone = None
+    if added:
+        vg = rankings.setdefault('vote_given', {})
+        vg[vid] = int(vg.get(vid, 0)) + 1
+        ms = rec.setdefault('ms', [])
+        if rec['c'] in MILESTONES_V and rec['c'] not in ms:
+            ms.append(rec['c'])
+            milestone = rec['c']
+
+    return {
+        'counts': dict(rec['r']), 'total': rec['c'], 'owner': int(owner),
+        'name': rec.get('n', 'Utente'), 'added': added, 'milestone': milestone,
+        'voter_total': int(rankings.get('vote_given', {}).get(vid, 0)),
+    }
 
 
 def _top_voted(rankings: dict, limit: int):
@@ -191,6 +238,40 @@ def _top_voted(rankings: dict, limit: int):
             continue
         if cnt > 0:
             rows.append((int(k), cnt, names.get(k, 'Utente')))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    return rows[:limit]
+
+
+def _top_video_recent(votes: dict, days: int = 7):
+    """Il singolo video più reagito negli ultimi `days` giorni (con file_id)."""
+    cutoff = time.time() - days * 86400
+    best = None
+    for rec in votes.values():
+        if not isinstance(rec, dict) or not rec.get('fid'):
+            continue
+        if float(rec.get('t', 0)) < cutoff:
+            continue
+        c = int(rec.get('c', 0))
+        if c > 0 and (best is None or c > best['c']):
+            best = {'fid': rec['fid'], 'owner': int(rec['o']),
+                    'name': rec.get('n', 'Utente'), 'c': c, 'r': rec.get('r', {})}
+    return best
+
+
+def _top_voted_month(votes: dict, limit: int, month_key: str):
+    """Classifica voti del mese, sommando le reazioni dei video creati nel mese."""
+    sums, names = {}, {}
+    for rec in votes.values():
+        if not isinstance(rec, dict):
+            continue
+        t = float(rec.get('t', 0))
+        dt = datetime.fromtimestamp(t, _TZ) if _TZ else datetime.fromtimestamp(t)
+        if f"{dt.year}-{dt.month:02d}" != month_key:
+            continue
+        o = str(rec.get('o'))
+        sums[o] = sums.get(o, 0) + int(rec.get('c', 0))
+        names[o] = rec.get('n', 'Utente')
+    rows = [(int(k), v, names[k]) for k, v in sums.items() if v > 0]
     rows.sort(key=lambda x: x[1], reverse=True)
     return rows[:limit]
 
@@ -294,21 +375,37 @@ class JsonRankingStore(RankingStore):
         out.sort(key=lambda x: x.get('count', 0), reverse=True)
         return out
 
-    async def create_vote(self, vote_id, owner_id, owner_name):
+    async def create_vote(self, vote_id, owner_id, owner_name, fid=None):
         self.data.setdefault('votes', {})
-        _create_vote(self.data['votes'], vote_id, owner_id, owner_name)
+        _create_vote(self.data['votes'], vote_id, owner_id, owner_name, fid)
         self.data['votes'] = _prune(self.data['votes'], CACHE_MAX, CACHE_TTL)
         await asyncio.to_thread(self._save)
 
-    async def toggle_vote(self, vote_id, voter_id):
+    async def toggle_reaction(self, vote_id, voter_id, emoji):
         self.data.setdefault('votes', {})
-        res = _toggle_vote(self.data['votes'], self.data, vote_id, voter_id)
+        res = _toggle_reaction(self.data['votes'], self.data, vote_id, voter_id, emoji)
         if res and not res.get('self'):
             await asyncio.to_thread(self._save)
         return res
 
     async def top_voted_week(self, limit=3):
         return _top_voted(self.data, limit)
+
+    async def top_video_week(self):
+        return _top_video_recent(self.data.get('votes', {}))
+
+    async def top_voted_month(self, limit=3):
+        return _top_voted_month(self.data.get('votes', {}), limit, _month_key())
+
+    async def get_vote_given(self, user_id):
+        return int((self.data.get('vote_given', {}) or {}).get(str(user_id), 0))
+
+    async def set_challenge(self, theme, by):
+        self.data['challenge'] = {'t': theme, 'b': by, 'ts': time.time()}
+        await asyncio.to_thread(self._save)
+
+    async def get_challenge(self):
+        return self.data.get('challenge')
 
 
 # ---------------------------------------------------------------------------
@@ -348,31 +445,61 @@ class FirestoreRankingStore(RankingStore):
             self._doc.set({'weekly': {}, 'vote_week': {}}, merge=True)
         await asyncio.to_thread(_op)
 
-    async def create_vote(self, vote_id, owner_id, owner_name):
+    async def create_vote(self, vote_id, owner_id, owner_name, fid=None):
         def _op():
             snap = self._votes.get()
             votes = (snap.to_dict() or {}) if snap.exists else {}
-            _create_vote(votes, vote_id, owner_id, owner_name)
+            _create_vote(votes, vote_id, owner_id, owner_name, fid)
             votes = _prune(votes, CACHE_MAX, CACHE_TTL)
             self._votes.set(votes)
         await asyncio.to_thread(_op)
 
-    async def toggle_vote(self, vote_id, voter_id):
+    async def toggle_reaction(self, vote_id, voter_id, emoji):
         def _op():
             vsnap = self._votes.get()
             votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
             rsnap = self._doc.get()
             rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
-            res = _toggle_vote(votes, rankings, vote_id, voter_id)
+            res = _toggle_reaction(votes, rankings, vote_id, voter_id, emoji)
             if res and not res.get('self'):
                 self._votes.set(votes)
-                self._doc.set({'vote_week': rankings.get('vote_week', {})}, merge=True)
+                self._doc.set({
+                    'vote_week': rankings.get('vote_week', {}),
+                    'vote_given': rankings.get('vote_given', {}),
+                }, merge=True)
             return res
         return await asyncio.to_thread(_op)
 
     async def top_voted_week(self, limit=3):
         data = await asyncio.to_thread(self._read)
         return _top_voted(data, limit)
+
+    async def top_video_week(self):
+        def _op():
+            snap = self._votes.get()
+            return (snap.to_dict() or {}) if snap.exists else {}
+        votes = await asyncio.to_thread(_op)
+        return _top_video_recent(votes)
+
+    async def top_voted_month(self, limit=3):
+        def _op():
+            snap = self._votes.get()
+            return (snap.to_dict() or {}) if snap.exists else {}
+        votes = await asyncio.to_thread(_op)
+        return _top_voted_month(votes, limit, _month_key())
+
+    async def get_vote_given(self, user_id):
+        data = await asyncio.to_thread(self._read)
+        return int((data.get('vote_given', {}) or {}).get(str(user_id), 0))
+
+    async def set_challenge(self, theme, by):
+        def _op():
+            self._doc.set({'challenge': {'t': theme, 'b': by, 'ts': time.time()}}, merge=True)
+        await asyncio.to_thread(_op)
+
+    async def get_challenge(self):
+        data = await asyncio.to_thread(self._read)
+        return data.get('challenge')
 
     async def get_earned(self, user_id):
         data = await asyncio.to_thread(self._read)
