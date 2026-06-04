@@ -308,7 +308,7 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
         if kind == 'video':
             await context.bot.send_video(chat_id=msg.chat_id, video=cached['fid'],
                                          caption=caption, parse_mode=ParseMode.HTML,
-                                         reply_markup=video_buttons(url, msg.from_user.id))
+                                         reply_markup=await make_video_keyboard(url, msg.from_user.id, msg.from_user.full_name))
         elif kind in ('photo', 'animation', 'document'):
             send = {'photo': context.bot.send_photo, 'animation': context.bot.send_animation,
                     'document': context.bot.send_document}[kind]
@@ -355,11 +355,22 @@ def register_cb_url(url: str) -> str:
     return token
 
 
-def video_buttons(url: str, owner_id: int) -> InlineKeyboardMarkup:
+def vote_label(count: int) -> str:
+    return "👍 Vota" if not count else f"👍 {count}"
+
+
+async def make_video_keyboard(url: str, owner_id: int, owner_name: str) -> InlineKeyboardMarkup:
+    """Tastiera sotto al video: Audio + Voto. Crea il record voto su Firestore."""
+    import uuid
     token = register_cb_url(url)
+    vote_id = uuid.uuid4().hex[:12]
+    try:
+        await ranking_store.create_vote(vote_id, owner_id, owner_name)
+    except Exception as e:
+        logger.warning(f"create_vote fallito: {e}")
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🎵 Audio", callback_data=f"a:{token}"),
-        InlineKeyboardButton("🗑️", callback_data=f"d:{owner_id}"),
+        InlineKeyboardButton(vote_label(0), callback_data=f"v:{vote_id}"),
     ]])
 
 
@@ -367,19 +378,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
 
-    if data.startswith("d:"):
+    if data.startswith("v:"):
+        vote_id = data[2:]
         try:
-            owner = int(data[2:])
-        except ValueError:
-            owner = 0
-        if q.from_user.id == owner or q.from_user.id == ADMIN_USER_ID:
-            try:
-                await q.message.delete()
-            except Exception:
-                pass
-            await q.answer("Eliminato 🗑️")
-        else:
-            await q.answer("Solo chi l'ha postato (o l'admin) può eliminarlo.", show_alert=True)
+            res = await ranking_store.toggle_vote(vote_id, q.from_user.id)
+        except Exception as e:
+            logger.warning(f"toggle_vote fallito: {e}")
+            await q.answer("Voto non riuscito, riprova.", show_alert=True)
+            return
+        if res is None:
+            await q.answer("Questo video è troppo vecchio per votarlo 🙈", show_alert=True)
+            return
+        if res.get('self'):
+            await q.answer("Non puoi votare il tuo stesso video 😄", show_alert=True)
+            return
+        # Aggiorna il contatore sul bottone, mantenendo il bottone Audio
+        try:
+            audio_cb = None
+            rows = q.message.reply_markup.inline_keyboard if (q.message and q.message.reply_markup) else []
+            for row in rows:
+                for b in row:
+                    if b.callback_data and b.callback_data.startswith('a:'):
+                        audio_cb = b.callback_data
+            btns = []
+            if audio_cb:
+                btns.append(InlineKeyboardButton("🎵 Audio", callback_data=audio_cb))
+            btns.append(InlineKeyboardButton(vote_label(res['count']), callback_data=f"v:{vote_id}"))
+            await q.edit_message_reply_markup(InlineKeyboardMarkup([btns]))
+        except Exception:
+            pass
+        await q.answer("👍 Votato!" if res.get('voted') else "Voto rimosso")
         return
 
     if data.startswith("a:"):
@@ -903,7 +931,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         video=f,
                         caption=caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=video_buttons(url, msg.from_user.id),
+                        reply_markup=await make_video_keyboard(url, msg.from_user.id, msg.from_user.full_name),
                     )
                 sent_ok = True
                 _fc = _fid_from_msg(_m)
@@ -1196,7 +1224,18 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         else:
             text += f"{badge} — <b>0</b> video\n"
 
-    text += f"\n📜 <i>{escape(aforisma)}</i>"
+    # 🏅 Medaglia del pubblico: utente con più voti ricevuti sui propri video
+    try:
+        voted = await ranking_store.top_voted_week(limit=1)
+    except Exception:
+        voted = []
+    if voted:
+        v_id, v_count, v_name = voted[0]
+        v_mention = f'<a href="tg://user?id={v_id}">{escape(v_name)}</a>'
+        text += (f"\n\n🏅 <b>Medaglia del pubblico</b>\n"
+                 f"{v_mention} con <b>{v_count}</b> voti sui suoi video! 👏")
+
+    text += f"\n\n📜 <i>{escape(aforisma)}</i>"
 
     await context.bot.send_message(
         chat_id=chat_id,

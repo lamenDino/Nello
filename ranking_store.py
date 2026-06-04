@@ -89,6 +89,15 @@ class RankingStore:
     async def get_chats(self) -> List[Dict]:
         raise NotImplementedError
 
+    async def create_vote(self, vote_id: str, owner_id: int, owner_name: str) -> None:
+        raise NotImplementedError
+
+    async def toggle_vote(self, vote_id: str, voter_id: int) -> Optional[Dict]:
+        raise NotImplementedError
+
+    async def top_voted_week(self, limit: int = 3) -> List[Tuple[int, int, str]]:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Logica condivisa (pura) riutilizzata dai due backend
@@ -145,6 +154,47 @@ def _user_stats(data: dict, user_id: int) -> Dict:
     }
 
 
+def _create_vote(votes: dict, vote_id: str, owner_id, owner_name: str):
+    votes[vote_id] = {'o': str(owner_id), 'n': owner_name or 'Utente', 'v': [], 'c': 0, 't': time.time()}
+
+
+def _toggle_vote(votes: dict, rankings: dict, vote_id: str, voter_id):
+    rec = votes.get(vote_id)
+    if not rec:
+        return None  # record perso (video troppo vecchio)
+    owner = str(rec.get('o'))
+    if owner == str(voter_id):
+        return {'self': True}
+    voters = rec.setdefault('v', [])
+    vid = str(voter_id)
+    if vid in voters:
+        voters.remove(vid)
+        rec['c'] = max(0, int(rec.get('c', 1)) - 1)
+        delta, voted = -1, False
+    else:
+        voters.append(vid)
+        rec['c'] = int(rec.get('c', 0)) + 1
+        delta, voted = 1, True
+    vw = rankings.setdefault('vote_week', {})
+    vw[owner] = max(0, int(vw.get(owner, 0)) + delta)
+    return {'count': rec['c'], 'owner': owner, 'name': rec.get('n', 'Utente'), 'voted': voted}
+
+
+def _top_voted(rankings: dict, limit: int):
+    vw = rankings.get('vote_week', {}) or {}
+    names = rankings.get('names', {}) or {}
+    rows = []
+    for k, v in vw.items():
+        try:
+            cnt = int(v)
+        except (ValueError, TypeError):
+            continue
+        if cnt > 0:
+            rows.append((int(k), cnt, names.get(k, 'Utente')))
+    rows.sort(key=lambda x: x[1], reverse=True)
+    return rows[:limit]
+
+
 def _prune(d: dict, maxn: int, ttl: int) -> dict:
     now = time.time()
     items = [(k, v) for k, v in d.items()
@@ -198,6 +248,7 @@ class JsonRankingStore(RankingStore):
 
     async def reset_weekly(self):
         self.data['weekly'] = {}
+        self.data['vote_week'] = {}
         await asyncio.to_thread(self._save)
 
     async def get_earned(self, user_id):
@@ -243,6 +294,22 @@ class JsonRankingStore(RankingStore):
         out.sort(key=lambda x: x.get('count', 0), reverse=True)
         return out
 
+    async def create_vote(self, vote_id, owner_id, owner_name):
+        self.data.setdefault('votes', {})
+        _create_vote(self.data['votes'], vote_id, owner_id, owner_name)
+        self.data['votes'] = _prune(self.data['votes'], CACHE_MAX, CACHE_TTL)
+        await asyncio.to_thread(self._save)
+
+    async def toggle_vote(self, vote_id, voter_id):
+        self.data.setdefault('votes', {})
+        res = _toggle_vote(self.data['votes'], self.data, vote_id, voter_id)
+        if res and not res.get('self'):
+            await asyncio.to_thread(self._save)
+        return res
+
+    async def top_voted_week(self, limit=3):
+        return _top_voted(self.data, limit)
+
 
 # ---------------------------------------------------------------------------
 # Backend: Firebase Firestore
@@ -253,6 +320,7 @@ class FirestoreRankingStore(RankingStore):
         self._doc = client.collection('bot_state').document('rankings_v2')
         self._recent = client.collection('bot_state').document('recent_links')
         self._cache = client.collection('bot_state').document('file_cache')
+        self._votes = client.collection('bot_state').document('votes')
         logger.info("Ranking: backend Firebase Firestore attivo")
 
     def _read(self) -> dict:
@@ -277,8 +345,34 @@ class FirestoreRankingStore(RankingStore):
 
     async def reset_weekly(self):
         def _op():
-            self._doc.set({'weekly': {}}, merge=True)
+            self._doc.set({'weekly': {}, 'vote_week': {}}, merge=True)
         await asyncio.to_thread(_op)
+
+    async def create_vote(self, vote_id, owner_id, owner_name):
+        def _op():
+            snap = self._votes.get()
+            votes = (snap.to_dict() or {}) if snap.exists else {}
+            _create_vote(votes, vote_id, owner_id, owner_name)
+            votes = _prune(votes, CACHE_MAX, CACHE_TTL)
+            self._votes.set(votes)
+        await asyncio.to_thread(_op)
+
+    async def toggle_vote(self, vote_id, voter_id):
+        def _op():
+            vsnap = self._votes.get()
+            votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
+            rsnap = self._doc.get()
+            rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
+            res = _toggle_vote(votes, rankings, vote_id, voter_id)
+            if res and not res.get('self'):
+                self._votes.set(votes)
+                self._doc.set({'vote_week': rankings.get('vote_week', {})}, merge=True)
+            return res
+        return await asyncio.to_thread(_op)
+
+    async def top_voted_week(self, limit=3):
+        data = await asyncio.to_thread(self._read)
+        return _top_voted(data, limit)
 
     async def get_earned(self, user_id):
         data = await asyncio.to_thread(self._read)
