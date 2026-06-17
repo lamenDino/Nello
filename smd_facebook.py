@@ -99,6 +99,17 @@ class FacebookMixin:
                     try:
                         mp4_success = await loop.run_in_executor(None, _dl_mp4)
                         if mp4_success and os.path.exists(tmp_mp4) and os.path.getsize(tmp_mp4) > 1000:
+                             # Estrai la descrizione del video per la didascalia
+                             try:
+                                 tm = (re.search(r'<meta\s+property="og:title"\s+content="(.*?)"', text, re.IGNORECASE)
+                                       or re.search(r'<meta\s+property="og:description"\s+content="(.*?)"', text, re.IGNORECASE)
+                                       or re.search(r'<title>(.*?)</title>', text, re.IGNORECASE))
+                                 if tm:
+                                     ttl = html.unescape(tm.group(1)).replace('| Facebook', '').strip()
+                                     if ttl:
+                                         self.last_fallback_title = ttl
+                             except Exception:
+                                 pass
                              return [tmp_mp4]
                     except Exception as e:
                         logger.warning(f"Facebook fallback MP4 download failed: {e}")

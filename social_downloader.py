@@ -741,6 +741,39 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
     # Public API
     # --------------------------
 
+    def _dedupe_files(self, files: List[str]) -> List[str]:
+        """Rimuove file scaricati IDENTICI (stesso contenuto) -> niente duplicati nei caroselli."""
+        import hashlib
+        seen = {}
+        out = []
+        for f in files:
+            try:
+                with open(f, 'rb') as fh:
+                    h = hashlib.md5(fh.read()).hexdigest()
+            except Exception:
+                out.append(f)
+                continue
+            if h in seen:
+                try:
+                    os.remove(f)  # elimina il duplicato dal disco
+                except Exception:
+                    pass
+                continue
+            seen[h] = f
+            out.append(f)
+        return out
+
+    def _pack_media_result(self, files: List[str], title, uploader, platform, url) -> Dict:
+        """Impacchetta un risultato: un solo VIDEO -> type 'video' (votabile inline);
+        altrimenti carosello (con file deduplicati)."""
+        files = self._dedupe_files(files)
+        vids = ('.mp4', '.m4v', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+        if len(files) == 1 and os.path.splitext(files[0])[1].lower() in vids:
+            return {'success': True, 'type': 'video', 'file_path': files[0],
+                    'title': title, 'uploader': uploader, 'platform': platform, 'url': url}
+        return {'success': True, 'type': 'carousel', 'files': files,
+                'title': title, 'uploader': uploader, 'platform': platform, 'url': url}
+
     async def download_video(self, url: str) -> Dict:
         """
         Main download.
@@ -751,21 +784,18 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         """
         clean_url = self.clean_url(url)
         platform = self.detect_platform(clean_url)
+        # Azzera il titolo dei fallback (il downloader è un singleton: evita titoli "vecchi")
+        self.last_fallback_title = None
 
         # TikTok photo: prova subito fallback (yt-dlp spesso non supporta /photo/)
         if platform == 'tiktok' and '/photo/' in clean_url:
             try:
                 files = await self._tiktok_photo_fallback(clean_url)
                 if files:
-                    return {
-                        'success': True,
-                        'type': 'carousel',
-                        'files': files,
-                        'title': getattr(self, 'last_fallback_title', None) or 'Contenuto',
-                        'uploader': 'Sconosciuto',
-                        'platform': platform,
-                        'url': clean_url
-                    }
+                    return self._pack_media_result(
+                        files,
+                        getattr(self, 'last_fallback_title', None) or 'Contenuto',
+                        'Sconosciuto', platform, clean_url)
             except Exception:
                 pass
 
@@ -805,15 +835,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 if self._is_playlist_like(info):
                     items = await self._download_carousel_items(info)
                     if items:
-                        return {
-                            'success': True,
-                            'type': 'carousel',
-                            'files': items,
-                            'title': title,
-                            'uploader': uploader,
-                            'platform': platform,
-                            'url': clean_url
-                        }
+                        return self._pack_media_result(items, title, uploader, platform, clean_url)
                     # Se non riesce a scaricare immagini/video, prova comunque come video
                     logger.info("Carosello rilevato ma nessuna immagine/video scaricata. Provo come video...")
                     if self.debug:
@@ -888,15 +910,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
              try:
                  fb_files = await self._facebook_fallback(clean_url)
                  if fb_files:
-                     return {
-                         'success': True,
-                         'type': 'carousel',
-                         'files': fb_files,
-                         'title': title,
-                         'uploader': uploader,
-                         'platform': platform,
-                         'url': clean_url
-                     }
+                     fb_title = getattr(self, 'last_fallback_title', None) or title
+                     return self._pack_media_result(fb_files, fb_title, uploader, platform, clean_url)
              except Exception as e:
                  logger.warning(f"Facebook fallback failed: {e}")
 
@@ -912,15 +927,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                     res_title = ""
                 
                 if res_files:
-                    return {
-                        'success': True,
-                        'type': 'carousel',
-                        'files': res_files,
-                        'title': getattr(self, 'last_fallback_title', None) or res_title if res_title else title,
-                        'uploader': uploader,
-                        'platform': platform,
-                        'url': clean_url
-                    }
+                    tk_title = getattr(self, 'last_fallback_title', None) or (res_title or title)
+                    return self._pack_media_result(res_files, tk_title, uploader, platform, clean_url)
             except Exception as e:
                 logger.warning(f"TikTok fallback failed: {e}")
 
@@ -930,15 +938,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 api_files = await self._instagram_api_fallback(clean_url)
                 if api_files:
                     title_to_use = getattr(self, 'last_fallback_title', None) or title
-                    return {
-                        'success': True,
-                        'type': 'carousel',
-                        'files': api_files,
-                        'title': title_to_use,
-                        'uploader': uploader,
-                        'platform': platform,
-                        'url': clean_url
-                    }
+                    return self._pack_media_result(api_files, title_to_use, uploader, platform, clean_url)
                 
                 # 2) Se API fallisce, prova scraping HTML (vecchio metodo)
                 fallback_resp = await self._instagram_photo_fallback(clean_url)
@@ -958,15 +958,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                             safe_files.append(f)
                     
                     if safe_files:
-                        return {
-                            'success': True,
-                            'type': 'carousel',
-                            'files': safe_files,
-                            'title': res_desc if res_desc else title,
-                            'uploader': uploader,
-                            'platform': platform,
-                            'url': clean_url
-                        }
+                        ig_title = getattr(self, 'last_fallback_title', None) or (res_desc or title)
+                        return self._pack_media_result(safe_files, ig_title, uploader, platform, clean_url)
             except Exception as e:
                 logger.warning(f"Instagram fallback failed: {e}")
 
