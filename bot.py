@@ -1154,16 +1154,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent_ok = False
             captured = []  # (tipo, file_id) per la cache del rinvio istantaneo
 
-            # Truncate title to 3 lines max
-            raw_title = info.get('title', 'N/A')
-            if raw_title:
-                 # Split lines, take first 3
-                 lines = raw_title.split('\n')
-                 if len(lines) > 3:
-                     raw_title = '\n'.join(lines[:3]) + "..."
-                 # Also strict char limit just in case
-                 if len(raw_title) > 300:
-                     raw_title = raw_title[:300] + "..."
+            # Descrizione: per i caroselli/foto la mostriamo (quasi) tutta — è ciò che fa
+            # capire il post. La didascalia Telegram è max ~1024 caratteri, quindi lasciamo
+            # margine per le altre righe (piattaforma/mittente/link/info).
+            raw_title = info.get('title', 'N/A') or 'Contenuto'
+            max_desc = 750 if info.get('type') == 'carousel' else 500
+            if len(raw_title) > max_desc:
+                raw_title = raw_title[:max_desc].rstrip() + "…"
 
             caption = build_caption(info, url, msg.from_user.full_name, raw_title, sender_id=msg.from_user.id)
 
