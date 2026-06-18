@@ -68,16 +68,29 @@ class TikTokMixin:
         uniq = self._extract_tiktok_photo_urls_from_html(html)
         logger.info(f"TikTok Fallback: found {len(uniq)} images from HTML")
 
-        # Tenta estrazione titolo da HTML (semplice)
+        # Descrizione: prima la vera caption (og:description / JSON desc), poi il <title>
+        # come ripiego — ma SCARTA quello generico "TikTok - Make Your Day".
         try:
-            # es: <title>Video description | TikTok</title>
-            match_title = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
-            if match_title:
-                t = match_title.group(1)
-                t = t.replace('| TikTok', '').strip()
-                found_title = t
-                self.last_fallback_title = t
-        except:
+            import html as _htmlmod
+            desc = None
+            m = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+            if m and m.group(1).strip():
+                desc = m.group(1)
+            if not desc:
+                m = re.search(r'"desc"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+                if m and m.group(1).strip():
+                    desc = m.group(1).encode().decode('unicode_escape', 'ignore')
+            if not desc:
+                m = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+                if m:
+                    t = m.group(1).replace('| TikTok', '').strip()
+                    if t and 'make your day' not in t.lower():
+                        desc = t
+            if desc:
+                desc = _htmlmod.unescape(desc).strip()
+                found_title = desc
+                self.last_fallback_title = desc
+        except Exception:
             pass
 
         if not uniq:
@@ -193,9 +206,30 @@ class TikTokMixin:
                     except Exception:
                         pass
 
-                # Parse robusto recursive. IMPORTANTE: ogni slide ha un 'urlList' con
-                # piu' URL mirror della STESSA immagine -> prendiamo solo il PRIMO,
-                # altrimenti il carosello esce con immagini duplicate.
+                # MIRATO: prendi SOLO le slide del post foto (imagePost.images), così
+                # eviti cover del video / avatar / cloni. Una sola immagine per slide.
+                def find_image_post(d):
+                    if isinstance(d, dict):
+                        ip = d.get('imagePost') or d.get('imagePostInfo')
+                        if isinstance(ip, dict) and isinstance(ip.get('images'), list):
+                            for img in ip['images']:
+                                if not isinstance(img, dict):
+                                    continue
+                                iu = img.get('imageURL') or img.get('imageUrl') or {}
+                                ul = iu.get('urlList') if isinstance(iu, dict) else None
+                                if ul:
+                                    urls.append(ul[0])
+                            return True
+                        for v in d.values():
+                            if find_image_post(v):
+                                return True
+                    elif isinstance(d, list):
+                        for i in d:
+                            if find_image_post(i):
+                                return True
+                    return False
+
+                # Ripiego: vecchia ricerca larga (se non trovo imagePost.images)
                 def recursive_find_images(d):
                     if isinstance(d, dict):
                         img = None
@@ -204,15 +238,15 @@ class TikTokMixin:
                         elif isinstance(d.get('displayImage'), dict) and d['displayImage'].get('urlList'):
                             img = d['displayImage']['urlList']
                         if img:
-                            urls.append(img[0])  # una sola immagine per slide
-
+                            urls.append(img[0])
                         for k, v in d.items():
                             recursive_find_images(v)
                     elif isinstance(d, list):
                         for i in d:
                             recursive_find_images(i)
-                
-                recursive_find_images(data)
+
+                if not find_image_post(data):
+                    recursive_find_images(data)
                 logger.info(f"TikTok Fallback: JSON blob {idx_json} processed, total urls: {len(urls)}")
             except Exception as e:
                 logger.warning(f"TikTok Fallback: JSON blob {idx_json} parse error: {e}")
