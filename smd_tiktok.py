@@ -93,23 +93,25 @@ class TikTokMixin:
         except Exception:
             pass
 
-        if not uniq:
-             logger.info("TikTok Fallback: HTML extraction failed, trying TIKWM API...")
+        # TIKWM: serve sia se mancano le immagini SIA se manca la descrizione (l'HTML su
+        # IP datacenter spesso non contiene la caption -> altrimenti resta "Contenuto").
+        if not uniq or not self.last_fallback_title:
+             logger.info("TikTok Fallback: interrogo TIKWM API (immagini/titolo)...")
              try:
                  api_url = "https://www.tikwm.com/api/"
-                 # INCREASED COUNT TO 35 to fix split albums
                  r = requests.post(api_url, data={'url': url, 'count': 35, 'cursor': 0, 'web': 1, 'hd': 1}, timeout=15, proxies=self.proxy_dict)
                  if r.status_code == 200:
                      data = r.json()
                      if data.get('code') == 0:
                          data_obj = data.get('data', {})
                          images = data_obj.get('images', [])
-                         logger.info(f"TikTok Fallback: TIKWM API found {len(images)} images")
-                         uniq = images
-                         
-                         # Estrai titolo da API se presente
-                         if 'title' in data_obj:
-                             found_title = data_obj['title']
+                         if not uniq and images:
+                             logger.info(f"TikTok Fallback: TIKWM API found {len(images)} images")
+                             uniq = images
+                         # La descrizione del post (TIKWM la espone come 'title')
+                         t = data_obj.get('title')
+                         if t and t.strip() and not self.last_fallback_title:
+                             found_title = t.strip()
                              self.last_fallback_title = found_title
              except Exception as e:
                  logger.warning(f"TikTok Fallback: TIKWM API failed: {e}")

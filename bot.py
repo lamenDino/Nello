@@ -1153,6 +1153,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # non quelli scaricati ma poi falliti in fase di invio.
             sent_ok = False
             captured = []  # (tipo, file_id) per la cache del rinvio istantaneo
+            vote_msg = None  # messaggio su cui si vota (carosello: il primo media)
 
             # Descrizione: per i caroselli/foto la mostriamo (quasi) tutta — è ciò che fa
             # capire il post. La didascalia Telegram è max ~1024 caratteri, quindi lasciamo
@@ -1203,29 +1204,33 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await loading.delete()
                     continue
 
+                # L'invito a reagire va DENTRO la didascalia (niente messaggio separato).
+                carousel_caption = caption + "\n💬 <i>Reagisci con un'emoji per votare il post!</i>"
+
                 # Se è un solo file, inviamolo come media singolo
                 if len(files) == 1:
                     photo_path = files[0]
                     ext = os.path.splitext(photo_path)[1].lower()
                     is_video = ext in ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
-                    
+
                     try:
                         with open(photo_path, "rb") as f:
                             if is_video:
                                 _m = await context.bot.send_video(
                                     chat_id=msg.chat_id,
                                     video=f,
-                                    caption=caption,
+                                    caption=carousel_caption,
                                     parse_mode=ParseMode.HTML
                                 )
                             else:
                                 _m = await context.bot.send_photo(
                                     chat_id=msg.chat_id,
                                     photo=f,
-                                    caption=caption,
+                                    caption=carousel_caption,
                                     parse_mode=ParseMode.HTML
                                 )
                         sent_ok = True
+                        vote_msg = _m
                         _fc = _fid_from_msg(_m)
                         if _fc:
                             captured.append(_fc)
@@ -1233,7 +1238,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         err_str = str(e).lower()
                         if 'caption' in err_str and 'too long' in err_str:
                              logger.warning("Caption too long for single item, truncating...")
-                             short_caption = caption[:950] + "..."
+                             short_caption = carousel_caption[:950] + "..."
                              try:
                                  with open(photo_path, "rb") as f:
                                     if is_video:
@@ -1241,6 +1246,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     else:
                                         _m = await context.bot.send_photo(chat_id=msg.chat_id, photo=f, caption=short_caption, parse_mode=ParseMode.HTML)
                                  sent_ok = True
+                                 vote_msg = _m
                                  _fc = _fid_from_msg(_m)
                                  if _fc:
                                      captured.append(_fc)
@@ -1278,13 +1284,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     if is_video:
                                         media.append(InputMediaVideo(
                                             media=f,
-                                            caption=caption,
+                                            caption=carousel_caption,
                                             parse_mode=ParseMode.HTML
                                         ))
                                     else:
                                         media.append(InputMediaPhoto(
                                             media=f,
-                                            caption=caption,
+                                            caption=carousel_caption,
                                             parse_mode=ParseMode.HTML
                                         ))
                                 else:
@@ -1299,6 +1305,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     media=media
                                 )
                                 sent_ok = True
+                                if chunk_index == 0 and _sent:
+                                    vote_msg = _sent[0]  # si vota reagendo al primo media
                                 for _sm in (_sent or []):
                                     _fc = _fid_from_msg(_sm)
                                     if _fc:
@@ -1310,13 +1318,15 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    logger.warning("Caption too long, truncating and retrying...")
                                    # Truncate caption on the first item
                                    if len(media) > 0:
-                                       media[0].caption = caption[:950] + "..."
+                                       media[0].caption = carousel_caption[:950] + "..."
                                        try:
                                            _sent = await context.bot.send_media_group(
                                                 chat_id=msg.chat_id,
                                                 media=media
                                            )
                                            sent_ok = True
+                                           if chunk_index == 0 and _sent:
+                                               vote_msg = _sent[0]
                                            for _sm in (_sent or []):
                                                _fc = _fid_from_msg(_sm)
                                                if _fc:
@@ -1351,17 +1361,12 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await ranking_store.set_cached(key, payload)
                 except Exception as e:
                     logger.warning(f"Cache file_id: set fallito: {e}")
-                # Caroselli/foto: si vota reagendo a un messaggio di follow-up con
-                # un'emoji nativa (l'album è fatto di più messaggi, non votabile bene).
-                if info.get("type") == "carousel":
+                # Caroselli/foto: il voto è sul primo media (si reagisce a quello),
+                # niente messaggio separato — l'invito è già nella didascalia.
+                if info.get("type") == "carousel" and vote_msg is not None:
                     try:
-                        _vm = await context.bot.send_message(
-                            chat_id=msg.chat_id,
-                            text="💬 <b>Reagisci a QUESTO messaggio con un'emoji per votare il post!</b>",
-                            parse_mode=ParseMode.HTML,
-                        )
                         await ranking_store.create_vote(
-                            f"{_vm.chat_id}:{_vm.message_id}",
+                            f"{vote_msg.chat_id}:{vote_msg.message_id}",
                             msg.from_user.id, msg.from_user.full_name, fid=None)
                     except Exception as e:
                         logger.warning(f"Voto carosello fallito: {e}")
