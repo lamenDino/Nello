@@ -116,6 +116,13 @@ class TikTokMixin:
              except Exception as e:
                  logger.warning(f"TikTok Fallback: TIKWM API failed: {e}")
 
+        # Se ancora niente descrizione (es. meme col testo dentro l'immagine, caption
+        # vuota), usa almeno l'autore preso dall'URL (sempre presente).
+        if not self.last_fallback_title:
+            am = re.search(r'tiktok\.com/@([\w.\-]+)', url)
+            if am:
+                self.last_fallback_title = f"Post di @{am.group(1)}"
+
         # Limita numero di immagini
         MAX = 35
         uniq = uniq[:MAX]
