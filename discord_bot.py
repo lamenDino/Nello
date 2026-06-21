@@ -268,16 +268,13 @@ def build_client(ns):
                 # punto in classifica (solo su invio riuscito)
                 await _award_point(channel, author)
 
-                # registra il voto su quel messaggio + pre-carica le reazioni
+                # registra il voto su quel messaggio. NON pre-carichiamo reazioni:
+                # gli utenti votano con le reazioni native di Discord (qualsiasi
+                # emoji = 1 voto), così non resta la "1" del bot sotto ogni post.
                 try:
                     await rs.create_vote(f"discord:{vote_msg.id}", author.id, author.display_name, fid=None)
-                    for emoji in REACTIONS:
-                        try:
-                            await vote_msg.add_reaction(emoji)
-                        except Exception:
-                            pass
                 except Exception as e:
-                    logger.debug(f"Discord create_vote/reactions: {e}")
+                    logger.debug(f"Discord create_vote: {e}")
 
             except Exception as e:
                 logger.error(f"Discord handle link error ({url}): {e}")
