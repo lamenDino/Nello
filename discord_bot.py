@@ -227,6 +227,7 @@ def build_client(ns):
                 pass
             return
 
+        sent_any = False
         for url in urls:
             loading = None
             try:
@@ -264,6 +265,7 @@ def build_client(ns):
                         pass
                 if not vote_msg:
                     continue
+                sent_any = True
 
                 # punto in classifica (solo su invio riuscito)
                 await _award_point(channel, author)
@@ -286,6 +288,14 @@ def build_client(ns):
                         await loading.edit(content=f"😵 Errore su questo link.\n🔗 <{url}>")
                     except Exception:
                         pass
+
+        # Cancella il messaggio originale col link (come su Telegram), se almeno un
+        # download è riuscito. Richiede il permesso "Gestisci messaggi".
+        if sent_any:
+            try:
+                await message.delete()
+            except Exception as e:
+                logger.debug(f"Discord: impossibile cancellare il messaggio originale: {e}")
 
     # ---------------- Comandi (prefisso !) ----------------
 
