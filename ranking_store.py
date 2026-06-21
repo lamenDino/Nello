@@ -98,6 +98,9 @@ class RankingStore:
     async def set_reaction(self, key, voter_id, new_emojis) -> Optional[Dict]:
         raise NotImplementedError
 
+    async def react_delta(self, key, voter_id, delta) -> Optional[Dict]:
+        raise NotImplementedError
+
     async def top_voted_week(self, limit: int = 3) -> List[Tuple[int, int, str]]:
         raise NotImplementedError
 
@@ -270,6 +273,43 @@ def _set_reaction(votes: dict, rankings: dict, key: str, voter_id, new_emojis):
     vw = rankings.setdefault('vote_week', {})
     vw[owner] = max(0, int(vw.get(owner, 0)) + owner_delta)
     added = has and not had
+    milestone = None
+    if added:
+        vg = rankings.setdefault('vote_given', {})
+        vg[vid] = int(vg.get(vid, 0)) + 1
+        ms = rec.setdefault('ms', [])
+        if rec['c'] in MILESTONES_V and rec['c'] not in ms:
+            ms.append(rec['c'])
+            milestone = rec['c']
+    return {'owner': int(owner), 'name': rec.get('n', 'Utente'), 'total': rec['c'],
+            'added': added, 'milestone': milestone,
+            'voter_total': int(rankings.get('vote_given', {}).get(vid, 0))}
+
+
+def _react_delta(votes: dict, rankings: dict, key: str, voter_id, delta: int):
+    """Voto da reazione nativa Discord. Discord manda un evento per ogni emoji
+    aggiunta/tolta (non lo stato assoluto), e un utente puo' mettere piu' emoji.
+    Qui contiamo le emoji per-utente: l'owner prende +1 quando un utente passa da
+    0 a >0 reazioni, -1 quando torna a 0. Vale 1 voto per utente, come Telegram."""
+    rec = votes.get(key)
+    if not rec:
+        return None
+    owner = str(rec.get('o'))
+    if owner == str(voter_id):
+        return {'self': True}
+    u = rec.setdefault('u', {})   # user_id -> numero di reazioni (Discord)
+    vid = str(voter_id)
+    prev = int(u.get(vid, 0) or 0)
+    new = max(0, prev + delta)
+    if new == 0:
+        u.pop(vid, None)
+    else:
+        u[vid] = new
+    owner_delta = 1 if (prev == 0 and new > 0) else (-1 if (prev > 0 and new == 0) else 0)
+    rec['c'] = max(0, int(rec.get('c', 0)) + owner_delta)
+    vw = rankings.setdefault('vote_week', {})
+    vw[owner] = max(0, int(vw.get(owner, 0)) + owner_delta)
+    added = owner_delta > 0
     milestone = None
     if added:
         vg = rankings.setdefault('vote_given', {})
@@ -478,6 +518,13 @@ class JsonRankingStore(RankingStore):
             await asyncio.to_thread(self._save)
         return res
 
+    async def react_delta(self, key, voter_id, delta):
+        self.data.setdefault('votes', {})
+        res = _react_delta(self.data['votes'], self.data, key, voter_id, delta)
+        if res and not res.get('self'):
+            await asyncio.to_thread(self._save)
+        return res
+
     async def top_voted_week(self, limit=3):
         return _top_voted(self.data, limit)
 
@@ -579,6 +626,22 @@ class FirestoreRankingStore(RankingStore):
             rsnap = self._doc.get()
             rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
             res = _set_reaction(votes, rankings, key, voter_id, new_emojis)
+            if res and not res.get('self'):
+                self._votes.set(votes)
+                self._doc.set({
+                    'vote_week': rankings.get('vote_week', {}),
+                    'vote_given': rankings.get('vote_given', {}),
+                }, merge=True)
+            return res
+        return await asyncio.to_thread(_op)
+
+    async def react_delta(self, key, voter_id, delta):
+        def _op():
+            vsnap = self._votes.get()
+            votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
+            rsnap = self._doc.get()
+            rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
+            res = _react_delta(votes, rankings, key, voter_id, delta)
             if res and not res.get('self'):
                 self._votes.set(votes)
                 self._doc.set({

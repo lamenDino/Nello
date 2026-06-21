@@ -1793,6 +1793,27 @@ def main():
     application.add_error_handler(error_handler)
     print("Handlers added.")
 
+    # Frontend Discord (opzionale): gira in un thread separato accanto a Telegram,
+    # condividendo downloader e store (voti/classifiche condivisi). Si attiva solo
+    # se DISCORD_TOKEN è impostato.
+    DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+    if DISCORD_TOKEN:
+        try:
+            import discord_bot
+            from types import SimpleNamespace
+            ns = SimpleNamespace(
+                ranking_store=ranking_store,
+                is_supported_link=is_supported_link,
+                detect_platform=detect_platform,
+                clean_title=_clean_title,
+                newly_earned=newly_earned,
+                get_rank=get_rank,
+                achievements=ACHIEVEMENTS,
+            )
+            discord_bot.start_in_thread(DISCORD_TOKEN, ns)
+        except Exception as e:
+            logger.error(f"Avvio frontend Discord fallito: {e}")
+
     application.job_queue.run_daily(
         weekly_ranking,
         time=time(hour=20, minute=0),

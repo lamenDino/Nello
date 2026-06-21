@@ -8,5 +8,6 @@ cloudscraper
 firebase-admin>=6.5.0
 bgutil-ytdlp-pot-provider
 yt-dlp-ejs
+discord.py>=2.3.0
 
 
