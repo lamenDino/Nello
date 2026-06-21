@@ -172,8 +172,12 @@ def build_client(ns):
             logger.debug(f"Discord achievement check: {e}")
 
     async def _send_media(channel, info, url, author):
-        """Invia video o carosello su Discord. Ritorna il messaggio su cui si vota,
-        oppure None se non è stato inviato nulla (es. file troppo grande)."""
+        """Invia video o carosello su Discord. Per replicare il layout di Telegram
+        (media SOPRA, info SOTTO), manda prima il media senza testo e poi la
+        didascalia come messaggio separato sotto: è su quest'ultimo che si vota,
+        così le reazioni finiscono proprio sotto le info. Ritorna il messaggio su
+        cui si vota, oppure None se non è stato inviato nulla."""
+        import discord
         label = _media_label(info)
         caption = _build_caption(ns, info, url, author.mention, label)
 
@@ -197,19 +201,13 @@ def build_client(ns):
             _clean_files(paths)
             return None
 
-        vote_msg = None
         try:
-            # Discord: max 10 allegati per messaggio. La caption va sul primo.
-            first = True
+            # 1) i media in cima, senza testo (Discord: max 10 allegati per messaggio)
             for i in range(0, len(small), 10):
-                chunk = small[i:i + 10]
-                import discord
-                files = [discord.File(p) for p in chunk]
-                content = caption if first else None
-                m = await channel.send(content=content, files=files)
-                if first:
-                    vote_msg = m
-                    first = False
+                files = [discord.File(p) for p in small[i:i + 10]]
+                await channel.send(files=files)
+            # 2) le info sotto: questo è il messaggio su cui si vota
+            vote_msg = await channel.send(content=caption)
         except Exception as e:
             logger.warning(f"Discord invio media fallito ({url}): {e}")
             _clean_files(paths)
