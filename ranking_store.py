@@ -128,6 +128,12 @@ class RankingStore:
     async def monthly_active_users(self) -> List[int]:
         raise NotImplementedError
 
+    async def get_wa_auth(self) -> Optional[Dict]:
+        raise NotImplementedError
+
+    async def set_wa_auth(self, blob: Dict) -> None:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Logica condivisa (pura) riutilizzata dai due backend
@@ -556,6 +562,13 @@ class JsonRankingStore(RankingStore):
     async def monthly_active_users(self):
         return [int(k) for k in (self.data.get('monthly', {}) or {}).keys()]
 
+    async def get_wa_auth(self):
+        return self.data.get('wa_auth')
+
+    async def set_wa_auth(self, blob):
+        self.data['wa_auth'] = blob
+        await asyncio.to_thread(self._save)
+
 
 # ---------------------------------------------------------------------------
 # Backend: Firebase Firestore
@@ -567,6 +580,7 @@ class FirestoreRankingStore(RankingStore):
         self._recent = client.collection('bot_state').document('recent_links')
         self._cache = client.collection('bot_state').document('file_cache')
         self._votes = client.collection('bot_state').document('votes')
+        self._wa = client.collection('bot_state').document('wa_auth')
         logger.info("Ranking: backend Firebase Firestore attivo")
 
     def _read(self) -> dict:
@@ -702,6 +716,17 @@ class FirestoreRankingStore(RankingStore):
     async def monthly_active_users(self):
         data = await asyncio.to_thread(self._read)
         return [int(k) for k in (data.get('monthly', {}) or {}).keys()]
+
+    async def get_wa_auth(self):
+        def _op():
+            snap = self._wa.get()
+            return (snap.to_dict() or {}).get('blob') if snap.exists else None
+        return await asyncio.to_thread(_op)
+
+    async def set_wa_auth(self, blob):
+        def _op():
+            self._wa.set({'blob': blob})
+        await asyncio.to_thread(_op)
 
     async def get_earned(self, user_id):
         data = await asyncio.to_thread(self._read)

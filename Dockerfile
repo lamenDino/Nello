@@ -30,6 +30,11 @@ COPY requirements.txt .
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
+# Dipendenze del worker WhatsApp (Baileys). Buildato sempre; il worker viene
+# avviato da start.sh solo se WHATSAPP_ENABLED=1.
+COPY wa/package.json /app/wa/package.json
+RUN cd /app/wa && npm install --omit=dev --no-audit --no-fund
+
 COPY . .
 
 EXPOSE 8080

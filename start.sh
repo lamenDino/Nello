@@ -13,4 +13,18 @@ else
     echo "ATTENZIONE: $BGUTIL_MAIN non trovato, il bot parte senza provider po_token"
 fi
 
+# Worker WhatsApp (Baileys): avviato solo se WHATSAPP_ENABLED=1. Aspetta da solo
+# che il bridge Python sia pronto (vedi wa_worker.js). Il QR del primo
+# collegamento comparira' in questi log.
+if [ "$WHATSAPP_ENABLED" = "1" ]; then
+    if [ -f "/app/wa/wa_worker.js" ]; then
+        node /app/wa/wa_worker.js >/tmp/wa_worker.log 2>&1 &
+        echo "worker WhatsApp avviato (pid $!) - log: /tmp/wa_worker.log"
+        # mostra i log del worker (incluso il QR) nello stream principale
+        ( tail -n +1 -F /tmp/wa_worker.log & ) 2>/dev/null
+    else
+        echo "ATTENZIONE: /app/wa/wa_worker.js non trovato, worker WhatsApp non avviato"
+    fi
+fi
+
 exec python bot.py

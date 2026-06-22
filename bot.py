@@ -1793,6 +1793,20 @@ def main():
     application.add_error_handler(error_handler)
     print("Handlers added.")
 
+    # Namespace condiviso con i frontend extra (Discord/WhatsApp): danno accesso a
+    # store, downloader-helpers e funzioni di gamification senza import circolari.
+    from types import SimpleNamespace
+    ns = SimpleNamespace(
+        ranking_store=ranking_store,
+        is_supported_link=is_supported_link,
+        detect_platform=detect_platform,
+        clean_title=_clean_title,
+        newly_earned=newly_earned,
+        get_rank=get_rank,
+        achievements=ACHIEVEMENTS,
+        voter_ach_at=VOTER_ACH_AT,
+    )
+
     # Frontend Discord (opzionale): gira in un thread separato accanto a Telegram,
     # condividendo downloader e store (voti/classifiche condivisi). Si attiva solo
     # se DISCORD_TOKEN è impostato.
@@ -1800,19 +1814,18 @@ def main():
     if DISCORD_TOKEN:
         try:
             import discord_bot
-            from types import SimpleNamespace
-            ns = SimpleNamespace(
-                ranking_store=ranking_store,
-                is_supported_link=is_supported_link,
-                detect_platform=detect_platform,
-                clean_title=_clean_title,
-                newly_earned=newly_earned,
-                get_rank=get_rank,
-                achievements=ACHIEVEMENTS,
-            )
             discord_bot.start_in_thread(DISCORD_TOKEN, ns)
         except Exception as e:
             logger.error(f"Avvio frontend Discord fallito: {e}")
+
+    # Bridge WhatsApp (opzionale): server interno per il worker Node/Baileys.
+    # Si attiva solo se WHATSAPP_ENABLED=1 (il worker Node viene avviato da start.sh).
+    if os.getenv('WHATSAPP_ENABLED', '0') == '1':
+        try:
+            import wa_bridge
+            wa_bridge.start_in_thread(ns)
+        except Exception as e:
+            logger.error(f"Avvio bridge WhatsApp fallito: {e}")
 
     application.job_queue.run_daily(
         weekly_ranking,
