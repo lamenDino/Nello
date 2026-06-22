@@ -230,6 +230,7 @@ async function start() {
       console.log('\n================ WHATSAPP QR ================');
       console.log('Apri WhatsApp -> Dispositivi collegati -> Collega un dispositivo e scansiona:');
       qrcode.generate(qr, { small: true });
+      console.log('WA_QR_RAW:' + qr);
       console.log('============================================\n');
     }
     if (connection === 'open') {
