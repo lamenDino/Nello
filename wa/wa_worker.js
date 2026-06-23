@@ -155,6 +155,7 @@ async function handleMessages(sock, upsert) {
       const ownerId = numId(ownerJid);
       const ownerName = m.pushName || 'Utente';
 
+      let didSend = false;
       for (const url of urls) {
         try {
           await sock.sendPresenceUpdate('composing', jid).catch(() => {});
@@ -184,6 +185,7 @@ async function handleMessages(sock, upsert) {
           }
           // pulizia file (Node e Python condividono il filesystem)
           for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) { /* */ } }
+          if (voteKey) didSend = true;
 
           // punto in classifica + record voto + achievement
           try {
@@ -200,6 +202,16 @@ async function handleMessages(sock, upsert) {
           } catch (e) { /* ignora */ }
         } catch (e) {
           console.log('WA: errore su', url, '-', e.message);
+        }
+      }
+
+      // Cancella il messaggio originale col link (come Telegram/Discord). Su
+      // WhatsApp serve che il bot sia ADMIN del gruppo, altrimenti fallisce.
+      if (didSend) {
+        try {
+          await sock.sendMessage(jid, { delete: m.key });
+        } catch (e) {
+          console.log('WA: impossibile cancellare il messaggio originale (serve admin?):', e.message);
         }
       }
     } catch (e) {

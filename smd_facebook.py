@@ -69,16 +69,21 @@ class FacebookMixin:
                 # Tenta un ultimo fallback brutale: cerca .mp4 nel sorgente
                 # A volte fb restituisce il link .mp4 in chiaro anche se yt-dlp non riesce a parsare
                 logger.info("Facebook fallback: detected VIDEO page. Searching for raw .mp4 link...")
-                mp4_matches = re.findall(r'"(https?:\/\/[^"]+\.mp4[^"]*)"', text.replace(r'\/', '/'))
-                if mp4_matches:
-                    best_mp4 = mp4_matches[0]
-                    # Filtra mp4
-                    for m in mp4_matches:
-                         if 'sd_src' in m or 'hd_src' in m:
-                            best_mp4 = m
-                            break
-                    
-                    logger.info(f"Facebook fallback: FOUND raw mp4. Downloading...")
+                # Estrai SOLO il video vero del post dalle chiavi note di Facebook,
+                # non un mp4 qualsiasi: la pagina contiene anche video suggeriti/
+                # correlati e prenderne uno a caso porta a inviare un video che non
+                # c'entra nulla (specie sui post-foto o sui /share/ non-video).
+                t_norm = text.replace('\\/', '/')
+                best_mp4 = None
+                _k = None
+                for _k in ('playable_url_quality_hd', 'browser_native_hd_url',
+                           'playable_url', 'browser_native_sd_url', 'hd_src', 'sd_src'):
+                    _km = re.search(r'"' + _k + r'"\s*:\s*"(https?://[^"]+?\.mp4[^"]*)"', t_norm)
+                    if _km:
+                        best_mp4 = _km.group(1)
+                        break
+                if best_mp4:
+                    logger.info(f"Facebook fallback: trovato video del post (chiave {_k}). Downloading...")
                     mp4_url = html.unescape(best_mp4)
                     ts = datetime.utcnow().strftime('%Y%m%d%H%M%S')
                     tmp_mp4 = os.path.join(self.temp_dir, f"fb_{ts}_fallback.mp4")
