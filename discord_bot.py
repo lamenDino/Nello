@@ -147,6 +147,19 @@ async def _probe_duration(path):
         return 0.0
 
 
+async def _probe_has_audio(path):
+    """True se il file ha almeno una traccia audio."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'ffprobe', '-v', 'error', '-select_streams', 'a',
+            '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        return b'audio' in out
+    except Exception:
+        return False
+
+
 async def _compress_video(path, target_bytes, duration=None):
     """Ricomprime un video (H.264, max 720p) per farlo stare sotto target_bytes.
     Usato SOLO su Discord per i video troppo pesanti. Ritorna il path del nuovo
@@ -159,6 +172,8 @@ async def _compress_video(path, target_bytes, duration=None):
         dur = await _probe_duration(path)
     if dur <= 0:
         return None
+    src_size = os.path.getsize(path) if os.path.exists(path) else 0
+    has_audio = await _probe_has_audio(path)
     out = os.path.splitext(path)[0] + '_disc.mp4'
     # Due tentativi: il secondo con bitrate più aggressivo se il primo sfora.
     for factor in (0.92, 0.72):
@@ -166,10 +181,14 @@ async def _compress_video(path, target_bytes, duration=None):
         video_k = int(max(total_bps - 128000, 150000) / 1000)
         cmd = [
             'ffmpeg', '-y', '-i', path,
+            # mappatura esplicita: primo video + primo audio (opzionale, '?'),
+            # così l'audio è SEMPRE incluso se presente nel sorgente.
+            '-map', '0:v:0', '-map', '0:a:0?',
             '-c:v', 'libx264', '-b:v', f'{video_k}k',
             '-maxrate', f'{int(video_k * 1.15)}k', '-bufsize', f'{video_k * 2}k',
             '-preset', 'veryfast', '-vf', 'scale=-2:min(720\\,ih)',
-            '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', out,
+            '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
+            '-movflags', '+faststart', out,
         ]
         proc = None
         try:
@@ -188,8 +207,11 @@ async def _compress_video(path, target_bytes, duration=None):
             _clean_files([out])
             return None
         if os.path.exists(out) and 0 < os.path.getsize(out) <= target_bytes:
+            logger.info(f"Discord compress OK: {src_size} -> {os.path.getsize(out)} bytes, "
+                        f"src_audio={has_audio}, dur={int(dur)}s")
             return out
         _clean_files([out])
+    logger.warning(f"Discord compress: non rientrato nel target ({src_size} bytes, dur={int(dur)}s)")
     return None
 
 
@@ -291,6 +313,15 @@ def build_client(ns):
 
         if compressed_any:
             caption += "\n🗜️ _video compresso per rientrare nei limiti di Discord_"
+
+        # diagnostica: se il video da inviare non ha audio, loggalo (per capire se
+        # l'audio manca già dal download o dopo la compressione)
+        try:
+            first_vid = next((p for p in small if os.path.splitext(p)[1].lower() in VIDEO_EXTS), None)
+            if first_vid and not await _probe_has_audio(first_vid):
+                logger.warning(f"Discord: il video da inviare NON ha audio (compresso={compressed_any}) {os.path.basename(first_vid)}")
+        except Exception:
+            pass
 
         try:
             # 1) i media in cima, senza testo (Discord: max 10 allegati per messaggio)
