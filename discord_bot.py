@@ -30,6 +30,7 @@ DISCORD_MAX_BYTES = int(DISCORD_MAX_MB * 1024 * 1024)
 REACTIONS = ['👍', '😂', '🔥', '😍', '😭', '🤮']
 VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
 VOTER_ACH_AT = 25  # reazioni date per sbloccare "Votante attivo" (come Telegram)
+COMPRESS_TIMEOUT = int(os.getenv('DISCORD_COMPRESS_TIMEOUT', '300'))
 
 # Rate limit anti-spam per utente Discord (in memoria, si azzera ai restart)
 RATE_MAX_PER_HOUR = int(os.getenv('DISCORD_RATE_MAX_PER_HOUR', os.getenv('RATE_MAX_PER_HOUR', '20')))
@@ -131,6 +132,65 @@ def _clean_files(paths):
             pass
 
 
+async def _probe_duration(path):
+    """Durata del video in secondi via ffprobe (0 se non determinabile)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        return float(out.decode().strip())
+    except Exception:
+        return 0.0
+
+
+async def _compress_video(path, target_bytes, duration=None):
+    """Ricomprime un video (H.264, max 720p) per farlo stare sotto target_bytes.
+    Usato SOLO su Discord per i video troppo pesanti. Ritorna il path del nuovo
+    file se rientra nel limite, altrimenti None. ffmpeg è già nell'immagine Docker."""
+    try:
+        dur = float(duration) if duration else 0.0
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0:
+        dur = await _probe_duration(path)
+    if dur <= 0:
+        return None
+    out = os.path.splitext(path)[0] + '_disc.mp4'
+    # Due tentativi: il secondo con bitrate più aggressivo se il primo sfora.
+    for factor in (0.92, 0.72):
+        total_bps = (target_bytes * 8) / dur * factor
+        video_k = int(max(total_bps - 128000, 150000) / 1000)
+        cmd = [
+            'ffmpeg', '-y', '-i', path,
+            '-c:v', 'libx264', '-b:v', f'{video_k}k',
+            '-maxrate', f'{int(video_k * 1.15)}k', '-bufsize', f'{video_k * 2}k',
+            '-preset', 'veryfast', '-vf', 'scale=-2:min(720\\,ih)',
+            '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', out,
+        ]
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await asyncio.wait_for(proc.wait(), timeout=COMPRESS_TIMEOUT)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            _clean_files([out])
+            return None
+        except Exception as e:
+            logger.warning(f"Discord compress error: {e}")
+            _clean_files([out])
+            return None
+        if os.path.exists(out) and 0 < os.path.getsize(out) <= target_bytes:
+            return out
+        _clean_files([out])
+    return None
+
+
 def build_client(ns):
     import discord
 
@@ -185,21 +245,50 @@ def build_client(ns):
             paths = [info.get('file_path')]
         else:
             paths = list(info.get('files', []) or [])
-        paths = [p for p in paths if p and os.path.exists(p)]
-        if not paths:
-            _clean_files(paths)
+        items = []
+        for p in paths:
+            if p and os.path.exists(p):
+                items.append({'path': p,
+                              'video': os.path.splitext(p)[1].lower() in VIDEO_EXTS,
+                              'size': os.path.getsize(p)})
+        if not items:
             return None
 
-        # File troppo grandi per Discord: manda il link in chiaro.
-        small = [p for p in paths if os.path.getsize(p) <= DISCORD_MAX_BYTES]
-        too_big = [p for p in paths if os.path.getsize(p) > DISCORD_MAX_BYTES]
-        if too_big and not small:
+        # I video troppo pesanti per Discord vengono RICOMPRESSI (invece di mandare
+        # solo il link). Le immagini non si comprimono qui.
+        limit = DISCORD_MAX_BYTES
+        target = int(limit * 0.95)
+        compressed_any = False
+        notice = None
+        for it in items:
+            if it['video'] and it['size'] > limit:
+                if notice is None:
+                    try:
+                        notice = await channel.send("🗜️ Il video è pesante, lo comprimo per Discord… un attimo")
+                    except Exception:
+                        notice = None
+                newp = await _compress_video(it['path'], target, info.get('duration'))
+                if newp:
+                    _clean_files([it['path']])
+                    it['path'] = newp
+                    it['size'] = os.path.getsize(newp)
+                    compressed_any = True
+        if notice:
+            try:
+                await notice.delete()
+            except Exception:
+                pass
+
+        small = [it['path'] for it in items if it['size'] <= limit]
+        if not small:
             await channel.send(
-                f"🐘 File troppo pesante per Discord (>{DISCORD_MAX_MB:.0f}MB).\n"
-                f"{caption}"
+                f"🐘 Troppo pesante per Discord anche dopo la compressione (>{DISCORD_MAX_MB:.0f}MB).\n{caption}"
             )
-            _clean_files(paths)
+            _clean_files([it['path'] for it in items])
             return None
+
+        if compressed_any:
+            caption += "\n🗜️ _video compresso per rientrare nei limiti di Discord_"
 
         try:
             # 1) i media in cima, senza testo (Discord: max 10 allegati per messaggio)
@@ -210,9 +299,9 @@ def build_client(ns):
             vote_msg = await channel.send(content=caption)
         except Exception as e:
             logger.warning(f"Discord invio media fallito ({url}): {e}")
-            _clean_files(paths)
+            _clean_files([it['path'] for it in items])
             return None
-        _clean_files(paths)
+        _clean_files([it['path'] for it in items])
         return vote_msg
 
     async def _handle_links(message, urls):
