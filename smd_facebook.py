@@ -118,10 +118,11 @@ class FacebookMixin:
                              return [tmp_mp4]
                     except Exception as e:
                         logger.warning(f"Facebook fallback MP4 download failed: {e}")
-                    # Let's abort image fallback for video.
-                logger.info("Facebook fallback: detected VIDEO content and no raw mp4 found. Aborting.")
-                return None
-            
+                # Nessun video reale del post: invece di non mandare nulla (o, peggio,
+                # un video sbagliato), proviamo a estrarre l'IMMAGINE del post qui
+                # sotto — caso tipico dei post-foto o dei /share/ che non sono video.
+                logger.info("Facebook fallback: nessun video reale del post -> provo a estrarre l'immagine.")
+
             # Regex for og:image - try multiple patterns
             # Spesso l'ordine degli attributi cambia o ci sono spazi diversi
             img_url = None
