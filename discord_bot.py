@@ -22,8 +22,10 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-# Limite upload Discord (server senza boost ~25MB). Oltre, mandiamo solo il link.
-DISCORD_MAX_MB = float(os.getenv('DISCORD_MAX_MB', '25'))
+# Limite upload Discord: per un server SENZA boost è 10MB (Discord l'ha riabbassato
+# nel 2024). Oltre questa soglia il video viene ricompresso (vedi _compress_video);
+# se hai un server boostato puoi alzarlo con la env DISCORD_MAX_MB (es. 50/100).
+DISCORD_MAX_MB = float(os.getenv('DISCORD_MAX_MB', '10'))
 DISCORD_MAX_BYTES = int(DISCORD_MAX_MB * 1024 * 1024)
 
 # Reazioni pre-caricate sotto ogni post (un click = un voto). Stesse di Telegram.
@@ -255,9 +257,9 @@ def build_client(ns):
             return None
 
         # I video troppo pesanti per Discord vengono RICOMPRESSI (invece di mandare
-        # solo il link). Le immagini non si comprimono qui.
-        limit = DISCORD_MAX_BYTES
-        target = int(limit * 0.95)
+        # solo il link). Le immagini non si comprimono qui. Uso una soglia un po'
+        # sotto il cap reale di Discord per evitare 413 sui file al limite.
+        limit = int(DISCORD_MAX_BYTES * 0.95)
         compressed_any = False
         notice = None
         for it in items:
@@ -267,7 +269,7 @@ def build_client(ns):
                         notice = await channel.send("🗜️ Il video è pesante, lo comprimo per Discord… un attimo")
                     except Exception:
                         notice = None
-                newp = await _compress_video(it['path'], target, info.get('duration'))
+                newp = await _compress_video(it['path'], limit, info.get('duration'))
                 if newp:
                     _clean_files([it['path']])
                     it['path'] = newp
