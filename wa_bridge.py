@@ -23,69 +23,17 @@ import threading
 
 from aiohttp import web
 
+import core
+
 logger = logging.getLogger(__name__)
 
 BRIDGE_PORT = int(os.getenv('WA_BRIDGE_PORT', '8765'))
 DOWNLOAD_TIMEOUT = int(os.getenv('DOWNLOAD_TIMEOUT', '300'))
 WHATSAPP_MAX_MB = float(os.getenv('WHATSAPP_MAX_MB', '16'))
 WHATSAPP_MAX_BYTES = int(WHATSAPP_MAX_MB * 1024 * 1024)
-VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+VIDEO_EXTS = core.VIDEO_EXTS
 
-
-def _human(n) -> str:
-    try:
-        n = int(n)
-    except (ValueError, TypeError):
-        return ""
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M".replace('.0M', 'M')
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K".replace('.0K', 'K')
-    return str(n)
-
-
-def _fmt_duration(sec) -> str:
-    try:
-        sec = int(sec)
-    except (ValueError, TypeError):
-        return ""
-    if sec <= 0:
-        return ""
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _caption(ns, info, url, label, sender_name):
-    raw_title = info.get('title') or 'Contenuto'
-    if len(raw_title) > 1500:
-        raw_title = raw_title[:1500].rstrip() + '…'
-    clean = ns.clean_title(raw_title, info.get('uploader') or info.get('channel')) or raw_title
-    plat = ns.detect_platform(url)
-    inviato = 'inviata' if label == 'Foto' else 'inviato'
-    lines = [f"📥 *{label} da:* {plat}"]
-    if sender_name:
-        lines.append(f"👤 *{label} {inviato} da:* {sender_name}")
-    lines.append(f"🔗 *Link originale:* {url}")
-    lines.append(f"📝 *Info:* {clean}")
-    # meta
-    bits = []
-    d = _fmt_duration(info.get('duration'))
-    if d:
-        bits.append(f"⏱️ {d}")
-    v = _human(info.get('view_count'))
-    if v:
-        bits.append(f"👁️ {v}")
-    likes = _human(info.get('like_count'))
-    if likes:
-        bits.append(f"❤️ {likes}")
-    up = info.get('uploader') or info.get('channel')
-    if up and str(up).lower() not in ('sconosciuto', 'none', '') and str(up).lower() not in clean.lower():
-        bits.append(f"✍️ {str(up)[:40]}")
-    if bits:
-        lines.append("📊 " + "  ".join(bits))
-    lines.append("💬 _Reagisci con un'emoji per votare il post!_")
-    return "\n".join(lines)
+# Gli helper di formattazione e la didascalia stanno in core.py (condivisi).
 
 
 def build_app(ns):
@@ -131,7 +79,8 @@ def build_app(ns):
         has_video = any(f['video'] for f in files)
         has_photo = any(not f['video'] for f in files)
         label = 'Contenuto' if (has_video and has_photo) else ('Video' if has_video else 'Foto')
-        caption = _caption(ns, info, url, label, sender_name)
+        caption = core.build_caption(info, url, sender_name or '', info.get('title') or 'Contenuto',
+                                     dialect='whatsapp', invite=True, max_desc=1500)
 
         oversized = any(f['size'] > WHATSAPP_MAX_BYTES for f in files)
         if oversized:

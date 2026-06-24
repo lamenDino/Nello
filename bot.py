@@ -155,134 +155,37 @@ def is_supported_link(url: str) -> bool:
     # in chat (il controllo durata è gestito nel downloader -> 'skip_long').
     return True
 
-def detect_platform(url: str) -> str:
-    url = url.lower()
-    if "tiktok" in url:
-        return "TikTok"
-    if "instagram" in url:
-        return "Instagram"
-    if "facebook" in url or "fb.watch" in url:
-        return "Facebook"
-    if "youtube" in url or "youtu.be" in url:
-        if "/shorts/" in url:
-             return "YouTube Shorts"
-        return "YouTube"
-    if "twitter" in url or "x.com" in url:
-        return "Twitter / X"
-    if "reddit" in url or "redd.it" in url:
-        return "Reddit"
-    if "twitch" in url:
-        return "Twitch"
-    return "Sconosciuta"
+# detect_platform, gli helper di formattazione e le icone vivono ora in core.py
+# (condivisi con i frontend Discord/WhatsApp). Qui restano gli alias + il wrapper
+# di build_caption con la "salsa" Telegram (menzione cliccabile, icone casuali, HTML).
+import core
+from core import (detect_platform, media_label, VIDEO_EXTS,
+                  ICONS_VIDEO, ICONS_FOTO, ICONS_USER, ICONS_LINK, ICONS_META)
+_clean_title = core.clean_title
+_human = core.human
+_fmt_duration = core.fmt_duration
+_meta_line = core.meta_line
 
 # =========================
 # DIDASCALIA (caption)
 # =========================
 
-# Pool di icone "vivaci" pescate a caso a ogni invio, così la didascalia cambia sempre.
-ICONS_VIDEO = ["🎬", "📹", "🎥", "🍿", "📺", "🎞️", "🕹️", "📀", "🎦"]
-ICONS_FOTO = ["📸", "🖼️", "📷", "🌄", "🏞️", "🎨", "🪄", "🖌️", "🌟"]
-ICONS_USER = ["👤", "🙋", "😎", "🤙", "🫶", "🧑‍💻", "🦸", "🥷", "👑", "🤩"]
-ICONS_LINK = ["🔗", "🌐", "📎", "🧷", "➡️", "🪢", "📡"]
-ICONS_META = ["📝", "💬", "🗒️", "✨", "💭", "📌", "🧠", "🔎"]
-
-VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
-
-
-def media_label(info: dict) -> str:
-    """Ritorna 'Video', 'Foto' o 'Contenuto' in base a cosa si sta inviando davvero."""
-    if info.get("type", "video") == "video":
-        return "Video"
-    files = info.get("files", []) or []
-    has_video = any(os.path.splitext(f)[1].lower() in VIDEO_EXTS for f in files)
-    has_photo = any(os.path.splitext(f)[1].lower() not in VIDEO_EXTS for f in files)
-    if has_video and has_photo:
-        return "Contenuto"
-    if has_video:
-        return "Video"
-    return "Foto"
-
-
-def _fmt_duration(sec) -> str:
-    try:
-        sec = int(sec)
-    except (ValueError, TypeError):
-        return ""
-    if sec <= 0:
-        return ""
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _human(n) -> str:
-    try:
-        n = int(n)
-    except (ValueError, TypeError):
-        return ""
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M".replace('.0M', 'M')
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K".replace('.0K', 'K')
-    return str(n)
-
-
-def _clean_title(raw: str, uploader: str = None) -> str:
-    """Ripulisce il titolo da info ridondanti che alcune piattaforme (es. Facebook)
-    incollano dentro: prefisso 'NN views · NN reactions |' e suffisso '| Autore'."""
-    if not raw:
-        return raw
-    import re
-    t = raw
-    # Prefisso tipo "69K views · 832 reactions | ..." (Facebook)
-    t = re.sub(r'^\s*[\d.,]+\s*[KMB]?\s*views?\b.*?\|\s*', '', t, flags=re.IGNORECASE)
-    # Suffisso "| Autore" se coincide con l'uploader (evita di ripeterlo)
-    if uploader and str(uploader).lower() not in ('sconosciuto', 'none', ''):
-        t = re.sub(r'\s*\|\s*' + re.escape(str(uploader)) + r'\s*$', '', t, flags=re.IGNORECASE)
-    return t.strip(' |\n')
-
-
-def _meta_line(info: dict, title: str = '') -> str:
-    """Riga opzionale con durata/views/like/autore, se disponibili.
-    Salta l'autore se già presente nel titolo (per non ripeterlo)."""
-    bits = []
-    d = _fmt_duration(info.get('duration'))
-    if d:
-        bits.append(f"⏱️ {d}")
-    v = _human(info.get('view_count'))
-    if v:
-        bits.append(f"👁️ {v}")
-    likes = _human(info.get('like_count'))
-    if likes:
-        bits.append(f"❤️ {likes}")
-    up = info.get('uploader') or info.get('channel')
-    if up and str(up).lower() not in ('sconosciuto', 'none', ''):
-        if str(up).lower() not in (title or '').lower():
-            bits.append(f"✍️ {escape(str(up)[:40])}")
-    return "  ".join(bits)
-
-
 def build_caption(info: dict, url: str, sender_name: str, raw_title: str, sender_id: int = None) -> str:
-    """Didascalia adattiva (Foto/Video/Contenuto) con icone casuali e accordo grammaticale."""
-    label = media_label(info)
-    inviato = "inviata" if label == "Foto" else "inviato"
-    icon_main = random.choice(ICONS_FOTO if label == "Foto" else ICONS_VIDEO)
-    # Menzione cliccabile del mittente (notifica e link al profilo)
+    """Didascalia Telegram: delega a core.build_caption (dialetto HTML) aggiungendo la
+    menzione cliccabile del mittente e le icone casuali (cambiano a ogni invio)."""
     if sender_id:
         sender = f'<a href="tg://user?id={sender_id}">{escape(sender_name)}</a>'
     else:
         sender = escape(sender_name)
-    clean_title = _clean_title(raw_title, info.get('uploader') or info.get('channel')) or raw_title
-    caption = (
-        f"{icon_main} <b>{label} da:</b> {detect_platform(url)}\n"
-        f"{random.choice(ICONS_USER)} <b>{label} {inviato} da:</b> {sender}\n"
-        f"{random.choice(ICONS_LINK)} <b>Link originale:</b> {escape(url)}\n"
-        f"{random.choice(ICONS_META)} <b>Info:</b> {escape(clean_title)}"
-    )
-    meta = _meta_line(info, clean_title)
-    if meta:
-        caption += f"\n📊 {meta}"
-    return caption
+    label = media_label(info)
+    icons = {
+        'main': random.choice(ICONS_FOTO if label == "Foto" else ICONS_VIDEO),
+        'user': random.choice(ICONS_USER),
+        'link': random.choice(ICONS_LINK),
+        'meta': random.choice(ICONS_META),
+    }
+    return core.build_caption(info, url, sender, raw_title,
+                              dialect='html', icons=icons, invite=False)
 
 # =========================
 # CACHE file_id (rinvio istantaneo)

@@ -20,6 +20,8 @@ import logging
 import threading
 from collections import defaultdict
 
+import core
+
 logger = logging.getLogger(__name__)
 
 # Limite upload Discord: per un server SENZA boost è 10MB (Discord l'ha riabbassato
@@ -30,7 +32,7 @@ DISCORD_MAX_BYTES = int(DISCORD_MAX_MB * 1024 * 1024)
 
 # Reazioni pre-caricate sotto ogni post (un click = un voto). Stesse di Telegram.
 REACTIONS = ['👍', '😂', '🔥', '😍', '😭', '🤮']
-VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+VIDEO_EXTS = core.VIDEO_EXTS
 VOTER_ACH_AT = 25  # reazioni date per sbloccare "Votante attivo" (come Telegram)
 COMPRESS_TIMEOUT = int(os.getenv('DISCORD_COMPRESS_TIMEOUT', '300'))
 
@@ -49,80 +51,7 @@ def _rate_limited(user_id: int) -> bool:
     return False
 
 
-def _human(n) -> str:
-    try:
-        n = int(n)
-    except (ValueError, TypeError):
-        return ""
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M".replace('.0M', 'M')
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}K".replace('.0K', 'K')
-    return str(n)
-
-
-def _fmt_duration(sec) -> str:
-    try:
-        sec = int(sec)
-    except (ValueError, TypeError):
-        return ""
-    if sec <= 0:
-        return ""
-    h, rem = divmod(sec, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _meta_line(info: dict, title: str) -> str:
-    bits = []
-    d = _fmt_duration(info.get('duration'))
-    if d:
-        bits.append(f"⏱️ {d}")
-    v = _human(info.get('view_count'))
-    if v:
-        bits.append(f"👁️ {v}")
-    likes = _human(info.get('like_count'))
-    if likes:
-        bits.append(f"❤️ {likes}")
-    up = info.get('uploader') or info.get('channel')
-    if up and str(up).lower() not in ('sconosciuto', 'none', ''):
-        if str(up).lower() not in (title or '').lower():
-            bits.append(f"✍️ {str(up)[:40]}")
-    return "  ".join(bits)
-
-
-def _media_label(info: dict) -> str:
-    if info.get('type', 'video') == 'video':
-        return 'Video'
-    files = info.get('files', []) or []
-    has_video = any(os.path.splitext(f)[1].lower() in VIDEO_EXTS for f in files)
-    has_photo = any(os.path.splitext(f)[1].lower() not in VIDEO_EXTS for f in files)
-    if has_video and has_photo:
-        return 'Contenuto'
-    if has_video:
-        return 'Video'
-    return 'Foto'
-
-
-def _build_caption(ns, info: dict, url: str, sender: str, label: str) -> str:
-    raw_title = info.get('title') or 'Contenuto'
-    # taglio descrizione: limite messaggio Discord = 2000, lasciamo margine
-    if len(raw_title) > 1500:
-        raw_title = raw_title[:1500].rstrip() + '…'
-    clean = ns.clean_title(raw_title, info.get('uploader') or info.get('channel')) or raw_title
-    plat = ns.detect_platform(url)
-    inviato = 'inviata' if label == 'Foto' else 'inviato'
-    lines = [
-        f"📥 **{label} da:** {plat}",
-        f"👤 **{label} {inviato} da:** {sender}",
-        f"🔗 **Link originale:** <{url}>",
-        f"📝 **Info:** {clean}",
-    ]
-    meta = _meta_line(info, clean)
-    if meta:
-        lines.append(f"📊 {meta}")
-    lines.append("💬 *Reagisci con un'emoji per votare il post!*")
-    return "\n".join(lines)
+# Gli helper di formattazione e la didascalia stanno in core.py (condivisi).
 
 
 def _clean_files(paths):
@@ -262,8 +191,8 @@ def build_client(ns):
         così le reazioni finiscono proprio sotto le info. Ritorna il messaggio su
         cui si vota, oppure None se non è stato inviato nulla."""
         import discord
-        label = _media_label(info)
-        caption = _build_caption(ns, info, url, author.mention, label)
+        caption = core.build_caption(info, url, author.mention, info.get('title') or 'Contenuto',
+                                     dialect='discord', invite=True, max_desc=1500)
 
         if info.get('type', 'video') == 'video':
             paths = [info.get('file_path')]
