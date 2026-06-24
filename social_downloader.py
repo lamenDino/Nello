@@ -231,6 +231,10 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         # Instagram
         if 'instagram' in url.lower():
+            # Story/reel: il link punta a UN singolo item. Senza questo, con i cookie
+            # yt-dlp scaricava l'intero "tray" di storie (3 reel invece di 1).
+            if '/stories/' in url.lower() or '/reel/' in url.lower():
+                opts['noplaylist'] = True
             # Tentativo 0: Senza cookies (spesso funziona meglio su IP server puliti)
             if attempt == 0:
                 pass 
@@ -543,14 +547,15 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         if candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
-            _, fu, fext = candidates[0]
-            return fu, fext
+            (ha, _res), fu, fext = candidates[0]
+            return fu, fext, bool(ha)
 
-        # Niente formats utili: prova entry['url'] (potrebbe essere solo-video)
+        # Niente formats utili: prova entry['url'] (assumiamo abbia audio: di solito
+        # è il progressivo). Se fosse muto, il merge non servirebbe comunque qui.
         u = entry.get('url')
         ext = (entry.get('ext') or '').lower()
         if u and ext in video_exts:
-            return u, ('mp4' if ext == 'm4v' else ext)
+            return u, ('mp4' if ext == 'm4v' else ext), True
 
         # Fallback: alcuni extractor mettono video_url o video
         for key in ('video_url', 'video', 'video_src'):
@@ -558,9 +563,85 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             if v and isinstance(v, str) and v.startswith('http'):
                 guessed = os.path.splitext(v.split('?')[0])[1].lstrip('.') or 'mp4'
                 guessed = guessed if guessed in video_exts else 'mp4'
-                return v, guessed
+                return v, guessed, True
 
         return None
+
+    def _pick_best_audio_url(self, entry: Dict) -> Optional[Tuple[str, str]]:
+        """URL del miglior formato SOLO-audio (per i video DASH di Instagram, dove
+        l'audio è in uno stream separato). Ritorna (url, ext) o None."""
+        cands = []
+        for f in entry.get('formats') or []:
+            fu = f.get('url')
+            if not fu:
+                continue
+            acodec = (f.get('acodec') or '').lower()
+            vcodec = (f.get('vcodec') or '').lower()
+            if acodec in ('', 'none'):
+                continue          # deve avere audio
+            if vcodec not in ('', 'none'):
+                continue          # deve essere solo-audio (no video)
+            abr = f.get('abr') or f.get('tbr') or 0
+            ext = (f.get('ext') or 'm4a').lower()
+            cands.append((abr, fu, ext))
+        if cands:
+            cands.sort(key=lambda x: x[0], reverse=True)
+            return cands[0][1], cands[0][2]
+        return None
+
+    def _merge_audio_if_possible(self, entry, video_path, safe_id, idx, headers):
+        """Scarica lo stream audio separato (DASH) e lo unisce al video con ffmpeg.
+        Ritorna il path del file unito, o il video originale se non c'è audio/fallisce."""
+        import subprocess
+        a = self._pick_best_audio_url(entry)
+        if not a:
+            logger.info(f"Carousel idx={idx}: nessuno stream audio separato, resta muto")
+            return video_path
+        audio_url, aext = a
+        audio_path = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}_audio.{aext or 'm4a'}")
+        try:
+            r = requests.get(audio_url, headers=headers, stream=True, timeout=60, proxies=self.proxy_dict)
+            r.raise_for_status()
+            with open(audio_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        f.write(chunk)
+        except Exception as e:
+            logger.warning(f"Carousel idx={idx}: download audio fallito: {str(e)[:120]}")
+            try:
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception:
+                pass
+            return video_path
+        if not (os.path.exists(audio_path) and os.path.getsize(audio_path) > 0):
+            return video_path
+
+        merged = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}_av.mp4")
+        cmd = ['ffmpeg', '-y', '-i', video_path, '-i', audio_path,
+               '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
+               '-shortest', merged]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        except Exception as e:
+            logger.warning(f"Carousel idx={idx}: merge ffmpeg fallito: {str(e)[:120]}")
+
+        if os.path.exists(merged) and os.path.getsize(merged) > 0:
+            for p in (video_path, audio_path):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+            logger.info(f"Carousel idx={idx}: audio DASH unito al video")
+            return merged
+        # merge fallito: tieni il video (muto), pulisci i temporanei
+        for p in (audio_path, merged):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        return video_path
 
     async def _download_carousel_items(self, info: Dict) -> List[str]:
         """
@@ -591,7 +672,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                     logger.warning(f"Nessun url video trovato per slide idx={idx}")
                     continue
 
-                video_url, ext = best
+                video_url, ext, has_audio = best
                 filename = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}.{ext}")
 
                 try:
@@ -609,6 +690,10 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                                 f.write(chunk)
 
                     if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                        # Video solo-video (DASH Instagram): scarica l'audio separato
+                        # e uniscilo, altrimenti il video uscirebbe muto.
+                        if not has_audio:
+                            filename = self._merge_audio_if_possible(entry, filename, safe_id, idx, headers)
                         files.append(filename)
                     else:
                         try:
