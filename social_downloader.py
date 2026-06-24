@@ -143,7 +143,11 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         # Base options yt-dlp
         self.base_opts = {
-            'format': 'best[ext=mp4]/best',
+            # Preferisci un mp4 progressivo CHE ABBIA AUDIO ([acodec!=none]); se il
+            # "best" mp4 e' solo-video (capita sui reel Instagram in DASH), unisci
+            # bestvideo+bestaudio (ffmpeg c'e'). Senza questo, certi video uscivano muti.
+            'format': 'best[ext=mp4][acodec!=none]/bestvideo*+bestaudio/best',
+            'merge_output_format': 'mp4',
             'outtmpl': os.path.join(self.temp_dir, '%(title).150s_%(id)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
@@ -241,7 +245,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         if 'youtube' in url.lower() or 'youtu.be' in url.lower():
             # Preferisci il formato progressivo mp4 (es. itag 18: audio+video gia' uniti,
             # nessun merge necessario). Fallback su adattivo+merge solo se serve.
-            opts['format'] = 'best[ext=mp4]/bestvideo+bestaudio/best'
+            opts['format'] = 'best[ext=mp4][acodec!=none]/bestvideo+bestaudio/best'
             opts['merge_output_format'] = 'mp4'
 
             opts['http_headers'].update({

@@ -174,14 +174,29 @@ async function handleMessages(sock, upsert) {
 
           const files = info.files || [];
           let voteKey = null;
-          for (let i = 0; i < files.length; i++) {
-            const f = files[i];
-            let buf;
-            try { buf = fs.readFileSync(f.path); } catch (e) { continue; }
-            const caption = i === 0 ? info.caption : undefined;
-            const payload = f.video ? { video: buf, caption } : { image: buf, caption };
-            const sent = await sock.sendMessage(jid, payload);
-            if (i === 0 && sent && sent.key) voteKey = `wa:${sent.key.id}`;
+          if (files.length === 1) {
+            // singolo media: didascalia attaccata (esce sotto il media)
+            const f = files[0];
+            let buf = null;
+            try { buf = fs.readFileSync(f.path); } catch (e) { buf = null; }
+            if (buf) {
+              const sent = await sock.sendMessage(
+                jid, f.video ? { video: buf, caption: info.caption } : { image: buf, caption: info.caption });
+              if (sent && sent.key) voteKey = `wa:${sent.key.id}`;
+            }
+          } else {
+            // carosello: TUTTE le foto SENZA didascalia, così WhatsApp le raggruppa
+            // in un unico album (una didascalia su una sola foto la separava dalle
+            // altre). La didascalia va come messaggio di testo subito sotto.
+            let firstSent = null;
+            for (const f of files) {
+              let buf;
+              try { buf = fs.readFileSync(f.path); } catch (e) { continue; }
+              const sent = await sock.sendMessage(jid, f.video ? { video: buf } : { image: buf });
+              if (!firstSent && sent) firstSent = sent;
+            }
+            if (firstSent && firstSent.key) voteKey = `wa:${firstSent.key.id}`;
+            try { await sock.sendMessage(jid, { text: info.caption }); } catch (e) { /* */ }
           }
           // pulizia file (Node e Python condividono il filesystem)
           for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) { /* */ } }
