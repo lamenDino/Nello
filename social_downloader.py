@@ -526,27 +526,31 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         """
         video_exts = ('mp4', 'm4v', 'mov', 'webm', 'mkv', 'ts', '3gp')
 
-        # Caso semplice: entry['url'] con estensione video
-        u = entry.get('url')
-        ext = (entry.get('ext') or '').lower()
-        if u and ext in video_exts:
-            return u, ext
-
-        # Cerca nei formats
+        # Cerca PRIMA nei formats, preferendo i progressivi CON audio: su Instagram
+        # lo stream a risoluzione più alta è spesso DASH solo-video (audio separato),
+        # e prenderlo dava video MUTI. Quindi ordina per (ha_audio, risoluzione).
         formats = entry.get('formats') or []
         candidates = []
         for f in formats:
             fu = f.get('url')
             fext = (f.get('ext') or '').lower()
             if fu and fext in video_exts:
-                score = (f.get('width') or 0) * (f.get('height') or 0)
-                score = score if score > 0 else (f.get('filesize') or 0)
-                candidates.append((score, fu, ('mp4' if fext == 'm4v' else fext)))
+                acodec = (f.get('acodec') or '').lower()
+                has_audio = acodec not in ('', 'none')
+                res = (f.get('width') or 0) * (f.get('height') or 0)
+                res = res if res > 0 else (f.get('filesize') or 0)
+                candidates.append(((1 if has_audio else 0, res), fu, ('mp4' if fext == 'm4v' else fext)))
 
         if candidates:
             candidates.sort(key=lambda x: x[0], reverse=True)
             _, fu, fext = candidates[0]
             return fu, fext
+
+        # Niente formats utili: prova entry['url'] (potrebbe essere solo-video)
+        u = entry.get('url')
+        ext = (entry.get('ext') or '').lower()
+        if u and ext in video_exts:
+            return u, ('mp4' if ext == 'm4v' else ext)
 
         # Fallback: alcuni extractor mettono video_url o video
         for key in ('video_url', 'video', 'video_src'):
