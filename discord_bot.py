@@ -104,6 +104,15 @@ async def _compress_video(path, target_bytes, duration=None):
     src_size = os.path.getsize(path) if os.path.exists(path) else 0
     has_audio = await _probe_has_audio(path)
     out = os.path.splitext(path)[0] + '_disc.mp4'
+    # Per i video lunghi abbassa la risoluzione e usa un preset più veloce: encode
+    # molto più rapido (evita il timeout sulla CPU lenta del free tier) e file più
+    # piccolo a parità di bitrate.
+    if dur > 180:
+        cap, preset = 480, 'superfast'
+    elif dur > 90:
+        cap, preset = 540, 'veryfast'
+    else:
+        cap, preset = 720, 'veryfast'
     # Due tentativi: il secondo con bitrate più aggressivo se il primo sfora.
     for factor in (0.92, 0.72):
         total_bps = (target_bytes * 8) / dur * factor
@@ -115,7 +124,7 @@ async def _compress_video(path, target_bytes, duration=None):
             '-map', '0:v:0', '-map', '0:a:0?',
             '-c:v', 'libx264', '-b:v', f'{video_k}k',
             '-maxrate', f'{int(video_k * 1.15)}k', '-bufsize', f'{video_k * 2}k',
-            '-preset', 'veryfast', '-vf', 'scale=-2:min(720\\,ih)',
+            '-preset', preset, '-vf', f'scale=-2:min({cap}\\,ih)',
             '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2',
             '-movflags', '+faststart', out,
         ]
@@ -130,6 +139,8 @@ async def _compress_video(path, target_bytes, duration=None):
             except Exception:
                 pass
             _clean_files([out])
+            logger.warning(f"Discord compress: TIMEOUT dopo {COMPRESS_TIMEOUT}s "
+                           f"(dur={int(dur)}s, cap={cap}p, src={src_size}B)")
             return None
         except Exception as e:
             logger.warning(f"Discord compress error: {e}")
