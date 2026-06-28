@@ -283,9 +283,19 @@ async function start() {
       const loggedOut = code === DisconnectReason.loggedOut;
       console.log('WA: connessione chiusa (code', code, ')');
       if (loggedOut) {
-        // Sessione revocata (401): cancella le credenziali stantie e riparti, così
-        // viene generato un QR NUOVO da riscansionare (invece di ritentare a vuoto).
-        console.log('WA: sessione terminata (logout/401). Pulisco le credenziali e rigenero il QR.');
+        // Sessione revocata (401): avvisa l'admin, cancella le credenziali stantie e
+        // riparti, così viene generato un QR NUOVO da riscansionare.
+        console.log('WA: sessione terminata (logout/401). Avviso admin, pulisco credenziali e rigenero il QR.');
+        bridge('/notify', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            text: '⚠️ <b>WhatsApp scollegato</b>\nNello è stato sganciato da WhatsApp (logout). '
+              + 'Per riattivarlo riscansiona il QR dai log di Render:\n'
+              + 'https://dashboard.render.com/web/srv-d4dkrok9c44c739eqsc0/logs\n\n'
+              + '📱 WhatsApp → Dispositivi collegati → Collega un dispositivo → inquadra il QR.',
+          }),
+        }).catch(() => {});
         clearRemoteAuth().finally(() =>
           setTimeout(() => start().catch((e) => console.log('WA restart err', e.message)), 3000));
       } else {

@@ -17,10 +17,12 @@ Avvio: wa_bridge.start_in_thread(ns). No-op se WHATSAPP_ENABLED non è attivo.
 """
 
 import os
+import time
 import asyncio
 import logging
 import threading
 
+import requests
 from aiohttp import web
 
 import core
@@ -32,6 +34,8 @@ DOWNLOAD_TIMEOUT = int(os.getenv('DOWNLOAD_TIMEOUT', '300'))
 WHATSAPP_MAX_MB = float(os.getenv('WHATSAPP_MAX_MB', '16'))
 WHATSAPP_MAX_BYTES = int(WHATSAPP_MAX_MB * 1024 * 1024)
 VIDEO_EXTS = core.VIDEO_EXTS
+
+_last_notify = [0.0]  # timestamp ultimo avviso admin (anti-spam)
 
 # Gli helper di formattazione e la didascalia stanno in core.py (condivisi).
 
@@ -168,12 +172,42 @@ def build_app(ns):
             return web.json_response({'ok': False})
         return web.json_response({'ok': True})
 
+    async def notify(request):
+        """Invia un avviso SOLO all'admin via Telegram (es. WhatsApp scollegato).
+        Usa l'HTTP API di Telegram così non serve l'oggetto Application qui."""
+        try:
+            b = await request.json()
+        except Exception:
+            return web.json_response({'ok': False})
+        text = (b.get('text') or '').strip()
+        token = getattr(ns, 'telegram_token', None)
+        admin = getattr(ns, 'admin_user_id', None)
+        if not (token and admin and text):
+            return web.json_response({'ok': False})
+        # anti-spam: max un avviso ogni 10 minuti
+        now = time.time()
+        if now - _last_notify[0] < 600:
+            return web.json_response({'ok': True, 'skipped': True})
+        _last_notify[0] = now
+
+        def _send():
+            try:
+                requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              json={'chat_id': admin, 'text': text,
+                                    'parse_mode': 'HTML', 'disable_web_page_preview': True},
+                              timeout=15)
+            except Exception as e:
+                logger.warning(f"WA notify admin fallito: {e}")
+        await asyncio.to_thread(_send)
+        return web.json_response({'ok': True})
+
     async def ping(request):
         return web.Response(text="OK")
 
     app = web.Application(client_max_size=8 * 1024 * 1024)
     app.add_routes([
         web.get('/ping', ping),
+        web.post('/notify', notify),
         web.post('/download', download),
         web.post('/sent', sent),
         web.post('/react', react),

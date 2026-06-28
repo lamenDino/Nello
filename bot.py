@@ -1708,6 +1708,8 @@ def main():
         get_rank=get_rank,
         achievements=ACHIEVEMENTS,
         voter_ach_at=VOTER_ACH_AT,
+        telegram_token=TOKEN,
+        admin_user_id=ADMIN_USER_ID,
     )
 
     # Frontend Discord (opzionale): gira in un thread separato accanto a Telegram,
