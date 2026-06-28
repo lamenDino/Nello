@@ -45,6 +45,21 @@ GROUP_CHAT_ID = int(os.getenv('CHAT_ID') or os.getenv('GROUP_CHAT_ID') or '21419
 
 # Admin a cui mandare gli avvisi (es. cookie scaduti). Default: GROUP_CHAT_ID.
 ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID') or '0') or GROUP_CHAT_ID
+# Password admin: con /admin <password> (in privato) ci si autentica come admin e si
+# diventa il destinatario degli avvisi. La password sta SOLO nella env (non nel codice).
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD') or ''
+
+
+async def effective_admin_id():
+    """ID a cui mandare gli avvisi: l'override impostato via /admin se presente,
+    altrimenti ADMIN_USER_ID."""
+    try:
+        c = await ranking_store.get_admin_chat()
+        if c:
+            return int(c)
+    except Exception:
+        pass
+    return ADMIN_USER_ID
 
 # Credenziali Render (opzionali): abilitano /setcookies persistente e l'auto-redeploy
 RENDER_API_KEY = os.getenv('RENDER_API_KEY')
@@ -571,7 +586,7 @@ async def note_download_failure(platform: str, context):
     _last_alert[platform] = now
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_USER_ID,
+            chat_id=await effective_admin_id(),
             text=(
                 f"⚠️ <b>Attenzione admin</b>\n"
                 f"{platform} ha fallito {_fail_streak[platform]} download di fila.\n"
@@ -586,6 +601,50 @@ async def note_download_failure(platform: str, context):
 
 def note_download_success(platform: str):
     _fail_streak[platform] = 0
+
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/admin <password> (in PRIVATO): autentica come admin e imposta questo chat
+    come destinatario degli avvisi (cookie scaduti, WhatsApp scollegato)."""
+    msg = update.message
+    chat = update.effective_chat
+    if not msg:
+        return
+    # Solo in privato: non esporre la password nel gruppo
+    if chat.type != 'private':
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        try:
+            await context.bot.send_message(update.effective_user.id,
+                                           "🔒 Usa /admin in chat privata con me, non nel gruppo.")
+        except Exception:
+            pass
+        return
+    parts = (msg.text or '').split(maxsplit=1)
+    pwd = parts[1].strip() if len(parts) > 1 else ''
+    # cancella subito il messaggio con la password (igiene)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not ADMIN_PASSWORD:
+        await context.bot.send_message(chat.id, "⚠️ Nessuna password admin configurata.")
+        return
+    if pwd != ADMIN_PASSWORD:
+        await context.bot.send_message(chat.id, "❌ Password errata.")
+        return
+    try:
+        await ranking_store.set_admin_chat(update.effective_user.id)
+    except Exception as e:
+        logger.warning(f"set_admin_chat fallito: {e}")
+    await context.bot.send_message(
+        chat.id,
+        "✅ <b>Sei autenticato come admin.</b>\nGli avvisi (cookie scaduti, WhatsApp "
+        "scollegato) arriveranno qui in privato.",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 # =========================
@@ -1684,6 +1743,7 @@ def main():
     application.add_handler(CommandHandler("stats", stats_cmd))
     application.add_handler(CommandHandler("profilo", profilo_cmd))
     application.add_handler(CommandHandler("votati", votati_cmd))
+    application.add_handler(CommandHandler("admin", admin_cmd))
     application.add_handler(CommandHandler("setcookies", setcookies_cmd))
     application.add_handler(CommandHandler("chats", chats_cmd))
     application.add_handler(CommandHandler("sfida", sfida_cmd))

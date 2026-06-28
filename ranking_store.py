@@ -150,6 +150,12 @@ class RankingStore:
     async def set_wa_auth(self, blob: Dict) -> None:
         raise NotImplementedError
 
+    async def get_admin_chat(self) -> Optional[int]:
+        raise NotImplementedError
+
+    async def set_admin_chat(self, chat_id: int) -> None:
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # Logica condivisa (pura) riutilizzata dai due backend
@@ -595,6 +601,13 @@ class JsonRankingStore(RankingStore):
         self.data['wa_auth'] = blob
         await asyncio.to_thread(self._save)
 
+    async def get_admin_chat(self):
+        return self.data.get('admin_chat')
+
+    async def set_admin_chat(self, chat_id):
+        self.data['admin_chat'] = int(chat_id)
+        await asyncio.to_thread(self._save)
+
 
 # ---------------------------------------------------------------------------
 # Backend: Firebase Firestore
@@ -749,6 +762,15 @@ class FirestoreRankingStore(RankingStore):
     async def set_wa_auth(self, blob):
         def _op():
             self._wa.set({'blob': blob})
+        await asyncio.to_thread(_op)
+
+    async def get_admin_chat(self):
+        data = await asyncio.to_thread(self._read)
+        return data.get('admin_chat')
+
+    async def set_admin_chat(self, chat_id):
+        def _op():
+            self._doc.set({'admin_chat': int(chat_id)}, merge=True)
         await asyncio.to_thread(_op)
 
     async def get_earned(self, user_id, platform='tg'):

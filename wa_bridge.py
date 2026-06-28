@@ -181,7 +181,13 @@ def build_app(ns):
             return web.json_response({'ok': False})
         text = (b.get('text') or '').strip()
         token = getattr(ns, 'telegram_token', None)
-        admin = getattr(ns, 'admin_user_id', None)
+        admin = None
+        try:
+            admin = await rs.get_admin_chat()
+        except Exception:
+            admin = None
+        if not admin:
+            admin = getattr(ns, 'admin_user_id', None)
         if not (token and admin and text):
             return web.json_response({'ok': False})
         # anti-spam: max un avviso ogni 10 minuti
