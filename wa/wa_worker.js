@@ -47,6 +47,21 @@ async function bridge(path, opts) {
   return res.json();
 }
 
+// Cancella la sessione salvata (Firestore). Serve quando WhatsApp revoca il device
+// (401): così al riavvio si parte senza credenziali e viene generato un QR nuovo.
+async function clearRemoteAuth() {
+  try {
+    await bridge('/authstate', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ blob: null }),
+    });
+    console.log('WA: credenziali stantie cancellate.');
+  } catch (e) {
+    console.log('WA: clear auth fallito:', e.message);
+  }
+}
+
 async function waitForBridge() {
   for (let i = 0; i < 60; i++) {
     try {
@@ -266,9 +281,16 @@ async function start() {
       const code = lastDisconnect && lastDisconnect.error
         && lastDisconnect.error.output && lastDisconnect.error.output.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
-      console.log('WA: connessione chiusa (code', code, ') - reconnect:', !loggedOut);
-      if (!loggedOut) setTimeout(() => start().catch((e) => console.log('WA restart err', e.message)), 3000);
-      else console.log('WA: sessione terminata (logout). Serve riscansionare il QR.');
+      console.log('WA: connessione chiusa (code', code, ')');
+      if (loggedOut) {
+        // Sessione revocata (401): cancella le credenziali stantie e riparti, così
+        // viene generato un QR NUOVO da riscansionare (invece di ritentare a vuoto).
+        console.log('WA: sessione terminata (logout/401). Pulisco le credenziali e rigenero il QR.');
+        clearRemoteAuth().finally(() =>
+          setTimeout(() => start().catch((e) => console.log('WA restart err', e.message)), 3000));
+      } else {
+        setTimeout(() => start().catch((e) => console.log('WA restart err', e.message)), 3000);
+      }
     }
   });
 
