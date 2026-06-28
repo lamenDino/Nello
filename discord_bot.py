@@ -34,7 +34,10 @@ DISCORD_MAX_BYTES = int(DISCORD_MAX_MB * 1024 * 1024)
 REACTIONS = ['👍', '😂', '🔥', '😍', '😭', '🤮']
 VIDEO_EXTS = core.VIDEO_EXTS
 VOTER_ACH_AT = 25  # reazioni date per sbloccare "Votante attivo" (come Telegram)
-COMPRESS_TIMEOUT = int(os.getenv('DISCORD_COMPRESS_TIMEOUT', '300'))
+COMPRESS_TIMEOUT = int(os.getenv('DISCORD_COMPRESS_TIMEOUT', '420'))
+# Thread ffmpeg: compromesso memoria/velocità. 1 era troppo lento (timeout sui video
+# lunghi), il default (tutti i core) usava troppa RAM (OOM sul free tier da 512MB).
+COMPRESS_THREADS = os.getenv('DISCORD_COMPRESS_THREADS', '2')
 
 # Rate limit anti-spam per utente Discord (in memoria, si azzera ai restart)
 RATE_MAX_PER_HOUR = int(os.getenv('DISCORD_RATE_MAX_PER_HOUR', os.getenv('RATE_MAX_PER_HOUR', '20')))
@@ -107,18 +110,16 @@ async def _compress_video(path, target_bytes, duration=None):
     # Per i video lunghi abbassa la risoluzione e usa un preset più veloce: encode
     # molto più rapido (evita il timeout sulla CPU lenta del free tier) e file più
     # piccolo a parità di bitrate.
-    if dur > 180:
-        cap, preset = 480, 'superfast'
-    elif dur > 90:
-        cap, preset = 540, 'veryfast'
-    else:
-        cap, preset = 720, 'veryfast'
+    # preset 'superfast' (veloce e con poca RAM); risoluzione più bassa per i video
+    # lunghi (encode più rapido, file più piccolo).
+    cap = 480 if dur > 120 else 540
+    preset = 'superfast'
     # Due tentativi: il secondo con bitrate più aggressivo se il primo sfora.
     for factor in (0.92, 0.72):
         total_bps = (target_bytes * 8) / dur * factor
         video_k = int(max(total_bps - 128000, 150000) / 1000)
         cmd = [
-            'ffmpeg', '-y', '-threads', '1', '-i', path,
+            'ffmpeg', '-y', '-threads', COMPRESS_THREADS, '-i', path,
             # mappatura esplicita: primo video + primo audio (opzionale, '?'),
             # così l'audio è SEMPRE incluso se presente nel sorgente.
             '-map', '0:v:0', '-map', '0:a:0?',
