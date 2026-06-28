@@ -118,10 +118,12 @@ async def _compress_video(path, target_bytes, duration=None):
         total_bps = (target_bytes * 8) / dur * factor
         video_k = int(max(total_bps - 128000, 150000) / 1000)
         cmd = [
-            'ffmpeg', '-y', '-i', path,
+            'ffmpeg', '-y', '-threads', '1', '-i', path,
             # mappatura esplicita: primo video + primo audio (opzionale, '?'),
             # così l'audio è SEMPRE incluso se presente nel sorgente.
             '-map', '0:v:0', '-map', '0:a:0?',
+            # -threads 1 limita la memoria di x264 (niente lookahead parallelo): serve
+            # a NON sforare i 512MB del piano free durante la compressione.
             '-c:v', 'libx264', '-b:v', f'{video_k}k',
             '-maxrate', f'{int(video_k * 1.15)}k', '-bufsize', f'{video_k * 2}k',
             '-preset', preset, '-vf', f'scale=-2:min({cap}\\,ih)',

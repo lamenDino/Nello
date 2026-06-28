@@ -189,26 +189,28 @@ async function handleMessages(sock, upsert) {
 
           const files = info.files || [];
           let voteKey = null;
+          // NB: passiamo i media come { url: path } (streaming da disco) invece di
+          // leggerli in un Buffer: così non si carica l'intero file in RAM (aiuta a
+          // non sforare i 512MB del piano free).
           if (files.length === 1) {
             // singolo media: didascalia attaccata (esce sotto il media)
             const f = files[0];
-            let buf = null;
-            try { buf = fs.readFileSync(f.path); } catch (e) { buf = null; }
-            if (buf) {
+            try {
               const sent = await sock.sendMessage(
-                jid, f.video ? { video: buf, caption: info.caption } : { image: buf, caption: info.caption });
+                jid, f.video ? { video: { url: f.path }, caption: info.caption }
+                             : { image: { url: f.path }, caption: info.caption });
               if (sent && sent.key) voteKey = `wa:${sent.key.id}`;
-            }
+            } catch (e) { console.log('WA: invio media fallito:', e.message); }
           } else {
             // carosello: TUTTE le foto SENZA didascalia, così WhatsApp le raggruppa
             // in un unico album (una didascalia su una sola foto la separava dalle
             // altre). La didascalia va come messaggio di testo subito sotto.
             let firstSent = null;
             for (const f of files) {
-              let buf;
-              try { buf = fs.readFileSync(f.path); } catch (e) { continue; }
-              const sent = await sock.sendMessage(jid, f.video ? { video: buf } : { image: buf });
-              if (!firstSent && sent) firstSent = sent;
+              try {
+                const sent = await sock.sendMessage(jid, f.video ? { video: { url: f.path } } : { image: { url: f.path } });
+                if (!firstSent && sent) firstSent = sent;
+              } catch (e) { /* salta questo file */ }
             }
             if (firstSent && firstSent.key) voteKey = `wa:${firstSent.key.id}`;
             try { await sock.sendMessage(jid, { text: info.caption }); } catch (e) { /* */ }

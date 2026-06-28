@@ -618,7 +618,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             return video_path
 
         merged = os.path.join(self.temp_dir, f"carousel_{safe_id}_{idx}_av.mp4")
-        cmd = ['ffmpeg', '-y', '-i', video_path, '-i', audio_path,
+        cmd = ['ffmpeg', '-y', '-threads', '1', '-i', video_path, '-i', audio_path,
                '-c:v', 'copy', '-c:a', 'aac', '-map', '0:v:0', '-map', '1:a:0',
                '-shortest', merged]
         try:
