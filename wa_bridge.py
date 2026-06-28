@@ -110,10 +110,10 @@ def build_app(ns):
         name = b.get('user_name') or 'Utente'
         key = b.get('key')
         try:
-            totals = await rs.add_point(uid, name)
-            already = await rs.get_earned(uid)
+            totals = await rs.add_point(uid, name, platform='wa')
+            already = await rs.get_earned(uid, platform='wa')
             for code in ns.newly_earned(totals, already):
-                await rs.add_earned(uid, code)
+                await rs.add_earned(uid, code, platform='wa')
                 txt = ns.achievements.get(code, code)
                 txt = txt.replace('<b>', '*').replace('</b>', '*')
                 out['achievements'].append(txt)
@@ -121,7 +121,7 @@ def build_app(ns):
             logger.warning(f"WA bridge sent/point: {e}")
         if key:
             try:
-                await rs.create_vote(key, uid, name, fid=None)
+                await rs.create_vote(key, uid, name, fid=None, platform='wa')
             except Exception:
                 pass
         return web.json_response(out)
@@ -138,7 +138,7 @@ def build_app(ns):
         except (TypeError, ValueError):
             return web.json_response({'ok': False})
         try:
-            res = await rs.set_reaction(key, uid, [emoji] if emoji else [])
+            res = await rs.set_reaction(key, uid, [emoji] if emoji else [], platform='wa')
         except Exception as e:
             logger.debug(f"WA bridge react: {e}")
             return web.json_response({'ok': False})

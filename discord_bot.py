@@ -179,14 +179,14 @@ def build_client(ns):
     async def _award_point(channel, author):
         """Punto in classifica + eventuali achievement per chi posta."""
         try:
-            totals = await rs.add_point(author.id, author.display_name)
+            totals = await rs.add_point(author.id, author.display_name, platform='dc')
         except Exception as e:
             logger.warning(f"Discord add_point fallito: {e}")
             return
         try:
-            already = await rs.get_earned(author.id)
+            already = await rs.get_earned(author.id, platform='dc')
             for code in ns.newly_earned(totals, already):
-                await rs.add_earned(author.id, code)
+                await rs.add_earned(author.id, code, platform='dc')
                 txt = ns.achievements.get(code)
                 if txt:
                     # togli i tag HTML di Telegram per Discord
@@ -334,7 +334,7 @@ def build_client(ns):
                 # gli utenti votano con le reazioni native di Discord (qualsiasi
                 # emoji = 1 voto), così non resta la "1" del bot sotto ogni post.
                 try:
-                    await rs.create_vote(f"discord:{vote_msg.id}", author.id, author.display_name, fid=None)
+                    await rs.create_vote(f"discord:{vote_msg.id}", author.id, author.display_name, fid=None, platform='dc')
                 except Exception as e:
                     logger.debug(f"Discord create_vote: {e}")
 
@@ -373,19 +373,19 @@ def build_client(ns):
         author = message.author
         try:
             if cmd in ('classifica', 'top'):
-                rows = await rs.get_board('weekly', 10)
+                rows = await rs.get_board('weekly', 10, platform='dc')
                 await ch.send(_fmt_board(rows, '🏆 Classifica settimanale', 'Ancora nessun contenuto questa settimana!'))
             elif cmd == 'mensile':
-                rows = await rs.get_board('monthly', 10)
+                rows = await rs.get_board('monthly', 10, platform='dc')
                 await ch.send(_fmt_board(rows, '📅 Classifica mensile', 'Ancora nessun contenuto questo mese!'))
             elif cmd in ('record', 'alltime'):
-                rows = await rs.get_board('alltime', 10)
+                rows = await rs.get_board('alltime', 10, platform='dc')
                 await ch.send(_fmt_board(rows, '👑 Classifica all-time', 'Ancora nessun contenuto!'))
             elif cmd == 'votati':
-                rows = await rs.top_voted_week(10)
+                rows = await rs.top_voted_week(10, platform='dc')
                 await ch.send(_fmt_board(rows, '❤️ Più votati (settimana)', 'Ancora nessun voto questa settimana!'))
             elif cmd == 'stats':
-                st = await rs.get_user_stats(author.id)
+                st = await rs.get_user_stats(author.id, platform='dc')
                 emoji, rank_title = ns.get_rank(st.get('alltime', 0))
                 await ch.send(
                     f"📊 **Statistiche di {author.display_name}**\n"
@@ -396,7 +396,7 @@ def build_client(ns):
                     + (f"  (#{st['rank']})" if st.get('rank') else "")
                 )
             elif cmd == 'profilo':
-                p = await rs.get_profile(author.id)
+                p = await rs.get_profile(author.id, platform='dc')
                 emoji, rank_title = ns.get_rank(p.get('alltime', 0))
                 await ch.send(
                     f"👤 **Profilo di {author.display_name}**\n"
@@ -422,7 +422,7 @@ def build_client(ns):
             return  # ignora le reazioni messe dal bot stesso (pre-caricamento)
         key = f"discord:{payload.message_id}"
         try:
-            res = await rs.react_delta(key, payload.user_id, delta)
+            res = await rs.react_delta(key, payload.user_id, delta, platform='dc')
         except Exception as e:
             logger.debug(f"Discord react_delta: {e}")
             return

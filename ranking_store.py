@@ -52,6 +52,22 @@ def _month_key() -> str:
     return f"{n.year}-{n.month:02d}"
 
 
+def _scope(data: dict, platform: str) -> dict:
+    """Sotto-classifica per piattaforma. 'tg' usa la RADICE (retrocompat: i dati
+    storici Telegram restano dove sono); 'dc'/'wa' hanno un namespace separato in
+    data['platforms'][platform]. Così le classifiche sono indipendenti."""
+    if not platform or platform == 'tg':
+        return data
+    return data.setdefault('platforms', {}).setdefault(platform, {})
+
+
+def _all_scopes(data: dict):
+    """Tutte le sotto-classifiche (radice tg + ogni piattaforma). Per il reset."""
+    yield data
+    for sub in (data.get('platforms') or {}).values():
+        yield sub
+
+
 class RankingStore:
     async def add_point(self, user_id: int, name: str) -> Dict[str, int]:
         raise NotImplementedError
@@ -194,9 +210,9 @@ def _user_stats(data: dict, user_id: int) -> Dict:
 MILESTONES_V = [5, 10, 25, 50, 100, 250]
 
 
-def _create_vote(votes: dict, vote_id: str, owner_id, owner_name: str, fid=None):
+def _create_vote(votes: dict, vote_id: str, owner_id, owner_name: str, fid=None, platform='tg'):
     votes[vote_id] = {'o': str(owner_id), 'n': owner_name or 'Utente', 'fid': fid,
-                      'u': {}, 'r': {}, 'c': 0, 'ms': [], 't': time.time()}
+                      'u': {}, 'r': {}, 'c': 0, 'ms': [], 't': time.time(), 'p': platform}
 
 
 def _toggle_reaction(votes: dict, rankings: dict, vote_id: str, voter_id, emoji: str):
@@ -344,12 +360,14 @@ def _top_voted(rankings: dict, limit: int):
     return rows[:limit]
 
 
-def _top_video_recent(votes: dict, days: int = 7):
+def _top_video_recent(votes: dict, days: int = 7, platform: str = 'tg'):
     """Il singolo video più reagito negli ultimi `days` giorni (con file_id)."""
     cutoff = time.time() - days * 86400
     best = None
     for rec in votes.values():
         if not isinstance(rec, dict) or not rec.get('fid'):
+            continue
+        if rec.get('p', 'tg') != platform:
             continue
         if float(rec.get('t', 0)) < cutoff:
             continue
@@ -360,11 +378,13 @@ def _top_video_recent(votes: dict, days: int = 7):
     return best
 
 
-def _top_voted_month(votes: dict, limit: int, month_key: str):
+def _top_voted_month(votes: dict, limit: int, month_key: str, platform: str = 'tg'):
     """Classifica voti del mese, sommando le reazioni dei video creati nel mese."""
     sums, names = {}, {}
     for rec in votes.values():
         if not isinstance(rec, dict):
+            continue
+        if rec.get('p', 'tg') != platform:
             continue
         t = float(rec.get('t', 0))
         dt = datetime.fromtimestamp(t, _TZ) if _TZ else datetime.fromtimestamp(t)
@@ -378,7 +398,7 @@ def _top_voted_month(votes: dict, limit: int, month_key: str):
     return rows[:limit]
 
 
-def _profile(rankings: dict, votes: dict, user_id, month_key: str) -> dict:
+def _profile(rankings: dict, votes: dict, user_id, month_key: str, platform: str = 'tg') -> dict:
     """Profilo completo: statistiche + voti ricevuti + miglior video + medaglie."""
     uid = str(user_id)
     st = _user_stats(rankings, user_id)  # weekly/monthly/alltime/rank/total_users/name
@@ -387,6 +407,8 @@ def _profile(rankings: dict, votes: dict, user_id, month_key: str) -> dict:
     best_video = 0
     for rec in (votes or {}).values():
         if not isinstance(rec, dict) or str(rec.get('o')) != uid:
+            continue
+        if rec.get('p', 'tg') != platform:
             continue
         c = int(rec.get('c', 0))
         votes_recv += c
@@ -445,28 +467,31 @@ class JsonRankingStore(RankingStore):
         except Exception as e:
             logger.warning(f"Ranking JSON: save fallito: {e}")
 
-    async def add_point(self, user_id, name):
-        totals = _apply_point(self.data, user_id, name)
+    async def add_point(self, user_id, name, platform='tg'):
+        totals = _apply_point(_scope(self.data, platform), user_id, name)
         await asyncio.to_thread(self._save)
         return totals
 
-    async def get_board(self, period, limit=10):
-        return _build_board(self.data, period, limit)
+    async def get_board(self, period, limit=10, platform='tg'):
+        return _build_board(_scope(self.data, platform), period, limit)
 
-    async def get_user_stats(self, user_id):
-        return _user_stats(self.data, user_id)
+    async def get_user_stats(self, user_id, platform='tg'):
+        return _user_stats(_scope(self.data, platform), user_id)
 
-    async def reset_weekly(self):
-        self.data['weekly'] = {}
-        self.data['vote_week'] = {}
+    async def reset_weekly(self, platform=None):
+        for sub in _all_scopes(self.data):
+            sub['weekly'] = {}
+            sub['vote_week'] = {}
         await asyncio.to_thread(self._save)
 
-    async def get_earned(self, user_id):
-        return set((self.data.get('earned', {}) or {}).get(str(user_id), []))
+    async def get_earned(self, user_id, platform='tg'):
+        sc = _scope(self.data, platform)
+        return set((sc.get('earned', {}) or {}).get(str(user_id), []))
 
-    async def add_earned(self, user_id, code):
-        self.data.setdefault('earned', {})
-        lst = self.data['earned'].setdefault(str(user_id), [])
+    async def add_earned(self, user_id, code, platform='tg'):
+        sc = _scope(self.data, platform)
+        sc.setdefault('earned', {})
+        lst = sc['earned'].setdefault(str(user_id), [])
         if code not in lst:
             lst.append(code)
             await asyncio.to_thread(self._save)
@@ -504,44 +529,44 @@ class JsonRankingStore(RankingStore):
         out.sort(key=lambda x: x.get('count', 0), reverse=True)
         return out
 
-    async def create_vote(self, vote_id, owner_id, owner_name, fid=None):
+    async def create_vote(self, vote_id, owner_id, owner_name, fid=None, platform='tg'):
         self.data.setdefault('votes', {})
-        _create_vote(self.data['votes'], vote_id, owner_id, owner_name, fid)
+        _create_vote(self.data['votes'], vote_id, owner_id, owner_name, fid, platform)
         self.data['votes'] = _prune(self.data['votes'], CACHE_MAX, CACHE_TTL)
         await asyncio.to_thread(self._save)
 
-    async def toggle_reaction(self, vote_id, voter_id, emoji):
+    async def toggle_reaction(self, vote_id, voter_id, emoji, platform='tg'):
         self.data.setdefault('votes', {})
-        res = _toggle_reaction(self.data['votes'], self.data, vote_id, voter_id, emoji)
+        res = _toggle_reaction(self.data['votes'], _scope(self.data, platform), vote_id, voter_id, emoji)
         if res and not res.get('self'):
             await asyncio.to_thread(self._save)
         return res
 
-    async def set_reaction(self, key, voter_id, new_emojis):
+    async def set_reaction(self, key, voter_id, new_emojis, platform='tg'):
         self.data.setdefault('votes', {})
-        res = _set_reaction(self.data['votes'], self.data, key, voter_id, new_emojis)
+        res = _set_reaction(self.data['votes'], _scope(self.data, platform), key, voter_id, new_emojis)
         if res and not res.get('self'):
             await asyncio.to_thread(self._save)
         return res
 
-    async def react_delta(self, key, voter_id, delta):
+    async def react_delta(self, key, voter_id, delta, platform='tg'):
         self.data.setdefault('votes', {})
-        res = _react_delta(self.data['votes'], self.data, key, voter_id, delta)
+        res = _react_delta(self.data['votes'], _scope(self.data, platform), key, voter_id, delta)
         if res and not res.get('self'):
             await asyncio.to_thread(self._save)
         return res
 
-    async def top_voted_week(self, limit=3):
-        return _top_voted(self.data, limit)
+    async def top_voted_week(self, limit=3, platform='tg'):
+        return _top_voted(_scope(self.data, platform), limit)
 
-    async def top_video_week(self):
-        return _top_video_recent(self.data.get('votes', {}))
+    async def top_video_week(self, platform='tg'):
+        return _top_video_recent(self.data.get('votes', {}), platform=platform)
 
-    async def top_voted_month(self, limit=3):
-        return _top_voted_month(self.data.get('votes', {}), limit, _month_key())
+    async def top_voted_month(self, limit=3, platform='tg'):
+        return _top_voted_month(self.data.get('votes', {}), limit, _month_key(), platform=platform)
 
-    async def get_vote_given(self, user_id):
-        return int((self.data.get('vote_given', {}) or {}).get(str(user_id), 0))
+    async def get_vote_given(self, user_id, platform='tg'):
+        return int((_scope(self.data, platform).get('vote_given', {}) or {}).get(str(user_id), 0))
 
     async def set_challenge(self, theme, by):
         self.data['challenge'] = {'t': theme, 'b': by, 'ts': time.time()}
@@ -550,17 +575,18 @@ class JsonRankingStore(RankingStore):
     async def get_challenge(self):
         return self.data.get('challenge')
 
-    async def get_profile(self, user_id):
-        return _profile(self.data, self.data.get('votes', {}), user_id, _month_key())
+    async def get_profile(self, user_id, platform='tg'):
+        return _profile(_scope(self.data, platform), self.data.get('votes', {}), user_id, _month_key(), platform)
 
-    async def incr_medal(self, user_id):
-        self.data.setdefault('medals', {})
+    async def incr_medal(self, user_id, platform='tg'):
+        sc = _scope(self.data, platform)
+        sc.setdefault('medals', {})
         uid = str(user_id)
-        self.data['medals'][uid] = int(self.data['medals'].get(uid, 0)) + 1
+        sc['medals'][uid] = int(sc['medals'].get(uid, 0)) + 1
         await asyncio.to_thread(self._save)
 
-    async def monthly_active_users(self):
-        return [int(k) for k in (self.data.get('monthly', {}) or {}).keys()]
+    async def monthly_active_users(self, platform='tg'):
+        return [int(k) for k in (_scope(self.data, platform).get('monthly', {}) or {}).keys()]
 
     async def get_wa_auth(self):
         return self.data.get('wa_auth')
@@ -587,105 +613,100 @@ class FirestoreRankingStore(RankingStore):
         snap = self._doc.get()
         return (snap.to_dict() or {}) if snap.exists else {}
 
-    async def add_point(self, user_id, name):
+    async def add_point(self, user_id, name, platform='tg'):
         def _op():
             data = self._read()
-            totals = _apply_point(data, user_id, name)
+            totals = _apply_point(_scope(data, platform), user_id, name)
             self._doc.set(data)
             return totals
         return await asyncio.to_thread(_op)
 
-    async def get_board(self, period, limit=10):
+    async def get_board(self, period, limit=10, platform='tg'):
         data = await asyncio.to_thread(self._read)
-        return _build_board(data, period, limit)
+        return _build_board(_scope(data, platform), period, limit)
 
-    async def get_user_stats(self, user_id):
+    async def get_user_stats(self, user_id, platform='tg'):
         data = await asyncio.to_thread(self._read)
-        return _user_stats(data, user_id)
+        return _user_stats(_scope(data, platform), user_id)
 
-    async def reset_weekly(self):
+    async def reset_weekly(self, platform=None):
         def _op():
-            self._doc.set({'weekly': {}, 'vote_week': {}}, merge=True)
+            data = self._read()
+            for sub in _all_scopes(data):
+                sub['weekly'] = {}
+                sub['vote_week'] = {}
+            self._doc.set(data)
         await asyncio.to_thread(_op)
 
-    async def create_vote(self, vote_id, owner_id, owner_name, fid=None):
+    async def create_vote(self, vote_id, owner_id, owner_name, fid=None, platform='tg'):
         def _op():
             snap = self._votes.get()
             votes = (snap.to_dict() or {}) if snap.exists else {}
-            _create_vote(votes, vote_id, owner_id, owner_name, fid)
+            _create_vote(votes, vote_id, owner_id, owner_name, fid, platform)
             votes = _prune(votes, CACHE_MAX, CACHE_TTL)
             self._votes.set(votes)
         await asyncio.to_thread(_op)
 
-    async def toggle_reaction(self, vote_id, voter_id, emoji):
+    async def toggle_reaction(self, vote_id, voter_id, emoji, platform='tg'):
         def _op():
             vsnap = self._votes.get()
             votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
             rsnap = self._doc.get()
             rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
-            res = _toggle_reaction(votes, rankings, vote_id, voter_id, emoji)
+            res = _toggle_reaction(votes, _scope(rankings, platform), vote_id, voter_id, emoji)
             if res and not res.get('self'):
                 self._votes.set(votes)
-                self._doc.set({
-                    'vote_week': rankings.get('vote_week', {}),
-                    'vote_given': rankings.get('vote_given', {}),
-                }, merge=True)
+                self._doc.set(rankings)
             return res
         return await asyncio.to_thread(_op)
 
-    async def set_reaction(self, key, voter_id, new_emojis):
+    async def set_reaction(self, key, voter_id, new_emojis, platform='tg'):
         def _op():
             vsnap = self._votes.get()
             votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
             rsnap = self._doc.get()
             rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
-            res = _set_reaction(votes, rankings, key, voter_id, new_emojis)
+            res = _set_reaction(votes, _scope(rankings, platform), key, voter_id, new_emojis)
             if res and not res.get('self'):
                 self._votes.set(votes)
-                self._doc.set({
-                    'vote_week': rankings.get('vote_week', {}),
-                    'vote_given': rankings.get('vote_given', {}),
-                }, merge=True)
+                self._doc.set(rankings)
             return res
         return await asyncio.to_thread(_op)
 
-    async def react_delta(self, key, voter_id, delta):
+    async def react_delta(self, key, voter_id, delta, platform='tg'):
         def _op():
             vsnap = self._votes.get()
             votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
             rsnap = self._doc.get()
             rankings = (rsnap.to_dict() or {}) if rsnap.exists else {}
-            res = _react_delta(votes, rankings, key, voter_id, delta)
+            res = _react_delta(votes, _scope(rankings, platform), key, voter_id, delta)
             if res and not res.get('self'):
                 self._votes.set(votes)
-                self._doc.set({
-                    'vote_week': rankings.get('vote_week', {}),
-                    'vote_given': rankings.get('vote_given', {}),
-                }, merge=True)
+                self._doc.set(rankings)
             return res
         return await asyncio.to_thread(_op)
 
-    async def top_voted_week(self, limit=3):
+    async def top_voted_week(self, limit=3, platform='tg'):
         data = await asyncio.to_thread(self._read)
-        return _top_voted(data, limit)
+        return _top_voted(_scope(data, platform), limit)
 
-    async def top_video_week(self):
+    async def top_video_week(self, platform='tg'):
         def _op():
             snap = self._votes.get()
             return (snap.to_dict() or {}) if snap.exists else {}
         votes = await asyncio.to_thread(_op)
-        return _top_video_recent(votes)
+        return _top_video_recent(votes, platform=platform)
 
-    async def top_voted_month(self, limit=3):
+    async def top_voted_month(self, limit=3, platform='tg'):
         def _op():
             snap = self._votes.get()
             return (snap.to_dict() or {}) if snap.exists else {}
         votes = await asyncio.to_thread(_op)
-        return _top_voted_month(votes, limit, _month_key())
+        return _top_voted_month(votes, limit, _month_key(), platform=platform)
 
-    async def get_vote_given(self, user_id):
+    async def get_vote_given(self, user_id, platform='tg'):
         data = await asyncio.to_thread(self._read)
-        return int((data.get('vote_given', {}) or {}).get(str(user_id), 0))
+        return int((_scope(data, platform).get('vote_given', {}) or {}).get(str(user_id), 0))
 
     async def set_challenge(self, theme, by):
         def _op():
@@ -696,26 +717,28 @@ class FirestoreRankingStore(RankingStore):
         data = await asyncio.to_thread(self._read)
         return data.get('challenge')
 
-    async def get_profile(self, user_id):
+    async def get_profile(self, user_id, platform='tg'):
         def _op():
             rankings = self._read()
             vsnap = self._votes.get()
             votes = (vsnap.to_dict() or {}) if vsnap.exists else {}
-            return _profile(rankings, votes, user_id, _month_key())
+            return _profile(_scope(rankings, platform), votes, user_id, _month_key(), platform)
         return await asyncio.to_thread(_op)
 
-    async def incr_medal(self, user_id):
+    async def incr_medal(self, user_id, platform='tg'):
         def _op():
             data = self._read()
-            medals = data.get('medals', {}) or {}
+            sc = _scope(data, platform)
+            medals = sc.get('medals', {}) or {}
             uid = str(user_id)
             medals[uid] = int(medals.get(uid, 0)) + 1
-            self._doc.set({'medals': medals}, merge=True)
+            sc['medals'] = medals
+            self._doc.set(data)
         await asyncio.to_thread(_op)
 
-    async def monthly_active_users(self):
+    async def monthly_active_users(self, platform='tg'):
         data = await asyncio.to_thread(self._read)
-        return [int(k) for k in (data.get('monthly', {}) or {}).keys()]
+        return [int(k) for k in (_scope(data, platform).get('monthly', {}) or {}).keys()]
 
     async def get_wa_auth(self):
         def _op():
@@ -728,18 +751,19 @@ class FirestoreRankingStore(RankingStore):
             self._wa.set({'blob': blob})
         await asyncio.to_thread(_op)
 
-    async def get_earned(self, user_id):
+    async def get_earned(self, user_id, platform='tg'):
         data = await asyncio.to_thread(self._read)
-        return set((data.get('earned', {}) or {}).get(str(user_id), []))
+        return set((_scope(data, platform).get('earned', {}) or {}).get(str(user_id), []))
 
-    async def add_earned(self, user_id, code):
+    async def add_earned(self, user_id, code, platform='tg'):
         def _op():
             data = self._read()
-            data.setdefault('earned', {})
-            lst = data['earned'].setdefault(str(user_id), [])
+            sc = _scope(data, platform)
+            sc.setdefault('earned', {})
+            lst = sc['earned'].setdefault(str(user_id), [])
             if code not in lst:
                 lst.append(code)
-                self._doc.set({'earned': {str(user_id): lst}}, merge=True)
+                self._doc.set(data)
         await asyncio.to_thread(_op)
 
     async def check_link(self, key):
