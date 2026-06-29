@@ -243,7 +243,7 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
         if kind == 'video':
             _m = await context.bot.send_video(
                 chat_id=msg.chat_id, video=cached['fid'],
-                caption=caption + "\n💬 <i>Reagisci con un'emoji per votarlo!</i>",
+                caption=caption,
                 parse_mode=ParseMode.HTML, reply_markup=audio_only_keyboard(url))
             try:
                 await ranking_store.create_vote(f"{_m.chat_id}:{_m.message_id}", msg.from_user.id,
@@ -1133,7 +1133,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # === VIDEO ===
             if info.get("type", "video") == "video":
-                video_caption = caption + "\n💬 <i>Reagisci con un'emoji per votarlo!</i>"
+                video_caption = caption
                 with open(info["file_path"], "rb") as f:
                     _m = await context.bot.send_video(
                         chat_id=msg.chat_id,
@@ -1167,7 +1167,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
 
                 # L'invito a reagire va DENTRO la didascalia (niente messaggio separato).
-                carousel_caption = caption + "\n💬 <i>Reagisci con un'emoji per votare il post!</i>"
+                carousel_caption = caption
 
                 # Se è un solo file, inviamolo come media singolo
                 if len(files) == 1:

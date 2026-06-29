@@ -206,7 +206,7 @@ def build_client(ns):
         cui si vota, oppure None se non è stato inviato nulla."""
         import discord
         caption = core.build_caption(info, url, author.mention, info.get('title') or 'Contenuto',
-                                     dialect='discord', invite=True, max_desc=1500)
+                                     dialect='discord', invite=False, max_desc=1500)
 
         if info.get('type', 'video') == 'video':
             paths = [info.get('file_path')]

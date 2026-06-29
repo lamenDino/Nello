@@ -84,7 +84,7 @@ def build_app(ns):
         has_photo = any(not f['video'] for f in files)
         label = 'Contenuto' if (has_video and has_photo) else ('Video' if has_video else 'Foto')
         caption = core.build_caption(info, url, sender_name or '', info.get('title') or 'Contenuto',
-                                     dialect='whatsapp', invite=True, max_desc=1500)
+                                     dialect='whatsapp', invite=False, max_desc=1500)
 
         oversized = any(f['size'] > WHATSAPP_MAX_BYTES for f in files)
         if oversized:

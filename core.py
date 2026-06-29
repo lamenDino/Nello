@@ -27,14 +27,19 @@ DEFAULT_ICONS = {'main': '📥', 'user': '👤', 'link': '🔗', 'meta': '📝'}
 # Dialetti di formattazione: grassetto/corsivo/escape/wrap-link per ogni frontend.
 DIALECTS = {
     'html':     {'b': lambda s: f"<b>{s}</b>", 'i': lambda s: f"<i>{s}</i>",
-                 'esc': _html_escape, 'wrap': lambda u: _html_escape(u)},
+                 'esc': _html_escape, 'wrap': lambda u: _html_escape(u),
+                 'spoiler': lambda s: f"<tg-spoiler>{s}</tg-spoiler>"},
     'discord':  {'b': lambda s: f"**{s}**",    'i': lambda s: f"*{s}*",
-                 'esc': lambda s: s,           'wrap': lambda u: f"<{u}>"},
+                 'esc': lambda s: s,           'wrap': lambda u: f"<{u}>",
+                 'spoiler': lambda s: f"||{s}||"},
     'whatsapp': {'b': lambda s: f"*{s}*",      'i': lambda s: f"_{s}_",
-                 'esc': lambda s: s,           'wrap': lambda u: u},
+                 'esc': lambda s: s,           'wrap': lambda u: u},  # niente spoiler
 }
 
 INVITE_TEXT = "Reagisci con un'emoji per votare il post!"
+# Sopra questa lunghezza, la descrizione di FOTO/caroselli va in uno spoiler
+# (Telegram/Discord) per non allungare la scheda. WhatsApp non ha spoiler.
+SPOILER_MIN_LEN = 120
 
 
 def detect_platform(url: str) -> str:
@@ -147,11 +152,19 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
         rt = rt[:max_desc].rstrip() + '…'
     clean = clean_title(rt, info.get('uploader') or info.get('channel')) or rt
 
+    # Info: per FOTO/caroselli con descrizione lunga, mettila in uno SPOILER così la
+    # scheda resta corta (tap per leggere tutto). WhatsApp non ha spoiler -> testo intero.
+    is_photo = label in ('Foto', 'Contenuto')
+    spoiler_fn = cfg.get('spoiler')
+    if is_photo and spoiler_fn and len(clean) > SPOILER_MIN_LEN:
+        info_val = spoiler_fn(cfg['esc'](clean))
+    else:
+        info_val = cfg['esc'](clean)
     lines = [
         f"{icons['main']} {cfg['b'](f'{label} da:')} {detect_platform(url)}",
         f"{icons['user']} {cfg['b'](f'{label} {inviato} da:')} {sender}",
         f"{icons['link']} {cfg['b']('Link originale:')} {cfg['wrap'](url)}",
-        f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}",
+        f"{icons['meta']} {cfg['b']('Info:')} {info_val}",
     ]
     meta = meta_line(info, clean, cfg['esc'])
     if meta:
