@@ -1332,6 +1332,19 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             msg.from_user.id, msg.from_user.full_name, fid=None)
                     except Exception as e:
                         logger.warning(f"Voto carosello fallito: {e}")
+                    # Tasto "Scarica audio": i media group non accettano bottoni inline,
+                    # quindi va in un messaggio a parte. Solo dove ha senso: slideshow
+                    # TikTok (hanno la musica) o caroselli che contengono un video.
+                    try:
+                        _files = info.get('files', []) or []
+                        _has_video = any(os.path.splitext(f)[1].lower() in VIDEO_EXTS for f in _files)
+                        if _has_video or detect_platform(url) == 'TikTok':
+                            await context.bot.send_message(
+                                chat_id=msg.chat_id, text="🎵 <b>Audio del post</b>",
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=audio_only_keyboard(url))
+                    except Exception:
+                        pass
                 try:
                     totals = await ranking_store.add_point(msg.from_user.id, msg.from_user.full_name)
                     # Registra il link per il "già postato"

@@ -26,20 +26,31 @@ DEFAULT_ICONS = {'main': '📥', 'user': '👤', 'link': '🔗', 'meta': '📝'}
 
 # Dialetti di formattazione: grassetto/corsivo/escape/wrap-link per ogni frontend.
 DIALECTS = {
+    # 'collapse': rende la descrizione lunga COMPATTA (tap per espandere). Telegram usa
+    # il blockquote espandibile (collassato a ~3 righe); Discord lo spoiler. WhatsApp no.
     'html':     {'b': lambda s: f"<b>{s}</b>", 'i': lambda s: f"<i>{s}</i>",
                  'esc': _html_escape, 'wrap': lambda u: _html_escape(u),
-                 'spoiler': lambda s: f"<tg-spoiler>{s}</tg-spoiler>"},
+                 'collapse': lambda s: f"<blockquote expandable>{s}</blockquote>"},
     'discord':  {'b': lambda s: f"**{s}**",    'i': lambda s: f"*{s}*",
                  'esc': lambda s: s,           'wrap': lambda u: f"<{u}>",
-                 'spoiler': lambda s: f"||{s}||"},
+                 'collapse': lambda s: f"||{s}||"},
     'whatsapp': {'b': lambda s: f"*{s}*",      'i': lambda s: f"_{s}_",
-                 'esc': lambda s: s,           'wrap': lambda u: u},  # niente spoiler
+                 'esc': lambda s: s,           'wrap': lambda u: u},  # niente collapse
 }
 
 INVITE_TEXT = "Reagisci con un'emoji per votare il post!"
-# Sopra questa lunghezza, la descrizione di FOTO/caroselli va in uno spoiler
-# (Telegram/Discord) per non allungare la scheda. WhatsApp non ha spoiler.
+# Sopra questa lunghezza, la descrizione di FOTO/caroselli va "collassata".
 SPOILER_MIN_LEN = 120
+
+
+def short_url(url: str) -> str:
+    """Accorcia un URL per la card togliendo i parametri di tracking (?...#...).
+    YouTube fa eccezione: la query '?v=' è essenziale, quindi resta intera."""
+    if not url:
+        return url
+    if 'youtube.com' in url.lower():
+        return url
+    return url.split('?')[0].split('#')[0]
 
 
 def detect_platform(url: str) -> str:
@@ -152,23 +163,30 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
         rt = rt[:max_desc].rstrip() + '…'
     clean = clean_title(rt, info.get('uploader') or info.get('channel')) or rt
 
-    # Info: per FOTO/caroselli con descrizione lunga, mettila in uno SPOILER così la
-    # scheda resta corta (tap per leggere tutto). WhatsApp non ha spoiler -> testo intero.
-    is_photo = label in ('Foto', 'Contenuto')
-    spoiler_fn = cfg.get('spoiler')
-    if is_photo and spoiler_fn and len(clean) > SPOILER_MIN_LEN:
-        info_val = spoiler_fn(cfg['esc'](clean))
+    # Link accorciato: su Telegram come testo cliccabile "apri originale" (nasconde
+    # l'URL lungo); su Discord/WhatsApp l'URL senza i parametri di tracking.
+    if dialect == 'html':
+        link_part = f'<a href="{_html_escape(url)}">apri originale</a>'
     else:
-        info_val = cfg['esc'](clean)
+        link_part = cfg['wrap'](short_url(url))
+
     lines = [
         f"{icons['main']} {cfg['b'](f'{label} da:')} {detect_platform(url)}",
         f"{icons['user']} {cfg['b'](f'{label} {inviato} da:')} {sender}",
-        f"{icons['link']} {cfg['b']('Link originale:')} {cfg['wrap'](url)}",
-        f"{icons['meta']} {cfg['b']('Info:')} {info_val}",
+        f"{icons['link']} {cfg['b']('Link:')} {link_part}",
     ]
-    meta = meta_line(info, clean, cfg['esc'])
-    if meta:
-        lines.append(f"📊 {meta}")
-    if invite:
-        lines.append(f"💬 {cfg['i'](INVITE_TEXT)}")
+
+    # Info: descrizione lunga COMPATTA (tap per espandere) su Telegram (blockquote
+    # espandibile) e Discord (spoiler); WhatsApp non ha collapse -> anteprima corta.
+    collapse = cfg.get('collapse')
+    if len(clean) > SPOILER_MIN_LEN:
+        if collapse:
+            lines.append(f"{icons['meta']} {cfg['b']('Info:')}\n{collapse(cfg['esc'](clean))}")
+        else:
+            preview = clean[:140].rstrip()
+            lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](preview)}…")
+    else:
+        lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}")
+
+    # Niente riga 📊 (durata/views/like/autore) e niente invito: card pulita.
     return "\n".join(lines)
