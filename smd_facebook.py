@@ -44,7 +44,8 @@ class FacebookMixin:
             if resp.status_code != 200:
                 logger.warning(f"Facebook fallback: status code {resp.status_code} for {url}")
                 return None
-                
+
+            resp.encoding = 'utf-8'  # evita mojibake (senza, requests decodifica come Latin-1)
             text = resp.text
 
             # --- DETECT VIDEO ---

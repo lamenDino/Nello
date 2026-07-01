@@ -1140,7 +1140,6 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         video=f,
                         caption=video_caption,
                         parse_mode=ParseMode.HTML,
-                        reply_markup=audio_only_keyboard(url),
                     )
                 sent_ok = True
                 _fc = _fid_from_msg(_m)
@@ -1332,19 +1331,6 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             msg.from_user.id, msg.from_user.full_name, fid=None)
                     except Exception as e:
                         logger.warning(f"Voto carosello fallito: {e}")
-                    # Tasto "Scarica audio": i media group non accettano bottoni inline,
-                    # quindi va in un messaggio a parte. Solo dove ha senso: slideshow
-                    # TikTok (hanno la musica) o caroselli che contengono un video.
-                    try:
-                        _files = info.get('files', []) or []
-                        _has_video = any(os.path.splitext(f)[1].lower() in VIDEO_EXTS for f in _files)
-                        if _has_video or detect_platform(url) == 'TikTok':
-                            await context.bot.send_message(
-                                chat_id=msg.chat_id, text="🎵 <b>Audio del post</b>",
-                                parse_mode=ParseMode.HTML,
-                                reply_markup=audio_only_keyboard(url))
-                    except Exception:
-                        pass
                 try:
                     totals = await ranking_store.add_point(msg.from_user.id, msg.from_user.full_name)
                     # Registra il link per il "già postato"
@@ -1612,9 +1598,39 @@ async def weekly_redeploy(context: ContextTypes.DEFAULT_TYPE):
 async def health(request):
     return web.Response(text="OK")
 
+
+async def serve_audio(request):
+    """Serve l'audio del contenuto per il link '/a/<token>' della card. Scarica
+    l'audio on-demand e lo restituisce come file mp3 (poi cancella il temporaneo)."""
+    tok = request.match_info.get('tok', '')
+    url = core.audio_url_by_token(tok)
+    if not url:
+        return web.Response(status=404, text="Link audio scaduto o non valido.")
+    try:
+        info = await get_downloader().download_audio(url)
+    except Exception as e:
+        logger.warning(f"serve_audio: download fallito ({url}): {e}")
+        info = None
+    path = (info or {}).get('file_path')
+    if not (info and info.get('success') and path and os.path.exists(path)):
+        return web.Response(status=502, text="Audio non disponibile per questo contenuto.")
+    try:
+        with open(path, 'rb') as fh:
+            data = fh.read()
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+    return web.Response(body=data, headers={
+        'Content-Type': 'audio/mpeg',
+        'Content-Disposition': 'attachment; filename="audio.mp3"',
+    })
+
+
 async def run_web():
     app = web.Application()
-    app.add_routes([web.get("/", health)])
+    app.add_routes([web.get("/", health), web.get("/a/{tok}", serve_audio)])
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)

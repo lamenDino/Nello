@@ -183,6 +183,7 @@ class InstagramMixin:
             )
             logger.info(f"Instagram Fallback: status {r.status_code}, len {len(r.text)}")
             r.raise_for_status()
+            r.encoding = 'utf-8'  # evita mojibake (senza, requests decodifica come Latin-1)
             html = r.text
         except Exception as e:
             logger.warning(f"Failed fetching Instagram page for fallback: {e}")

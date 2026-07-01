@@ -51,6 +51,7 @@ class TikTokMixin:
             )
             logger.info(f"TikTok Fallback: status {r.status_code}, len {len(r.text)}")
             r.raise_for_status()
+            r.encoding = 'utf-8'  # TikTok è UTF-8; senza, requests usa Latin-1 -> caratteri strani
             html = r.text
 
             # Dump HTML solo in debug (evita di sporcare il filesystem in produzione)
@@ -79,7 +80,10 @@ class TikTokMixin:
             if not desc:
                 m = re.search(r'"desc"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
                 if m and m.group(1).strip():
-                    desc = m.group(1).encode().decode('unicode_escape', 'ignore')
+                    try:
+                        desc = json.loads('"' + m.group(1) + '"')  # decodifica \uXXXX correttamente
+                    except Exception:
+                        desc = m.group(1)
             if not desc:
                 m = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
                 if m:

@@ -10,9 +10,36 @@ Così una modifica alla didascalia si fa una volta sola. I frontend passano solo
 parti che li distinguono (mittente già renderizzato, icone, se mostrare l'invito).
 """
 
+import os
 from html import escape as _html_escape
 
 VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
+
+# --- Link "scarica audio" servito dal web server del bot su /a/<token> ---
+# Così l'audio è un semplice link accorciato che funziona su Telegram, Discord e
+# WhatsApp (niente più bottone inline, che i caroselli non supportavano).
+AUDIO_BASE = (os.getenv('PUBLIC_URL') or os.getenv('RENDER_EXTERNAL_URL')
+              or 'https://nello-9amr.onrender.com').rstrip('/')
+_audio_links = {}      # token -> url originale
+_audio_counter = [0]
+
+
+def audio_link_for(url: str):
+    """Registra l'url e ritorna il link accorciato '{base}/a/<token>' da mettere
+    nella card. Il web server, quando lo apri, scarica e serve l'audio."""
+    if not AUDIO_BASE or not url:
+        return None
+    _audio_counter[0] = (_audio_counter[0] + 1) % 1_000_000
+    tok = format(_audio_counter[0], 'x')
+    _audio_links[tok] = url
+    if len(_audio_links) > 4000:  # prune semplice
+        for k in list(_audio_links)[:2000]:
+            _audio_links.pop(k, None)
+    return f"{AUDIO_BASE}/a/{tok}"
+
+
+def audio_url_by_token(tok: str):
+    return _audio_links.get(tok)
 
 # Pool di icone "vivaci" pescate a caso (usate da Telegram per variare la didascalia).
 ICONS_VIDEO = ["🎬", "📹", "🎥", "🍿", "📺", "🎞️", "🕹️", "📀", "🎦"]
@@ -187,6 +214,16 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
             lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](preview)}…")
     else:
         lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}")
+
+    # Link "scarica audio": per i video e le slideshow TikTok (che hanno la musica).
+    show_audio = (label == 'Video') or (label in ('Foto', 'Contenuto') and detect_platform(url) == 'TikTok')
+    if show_audio:
+        au = audio_link_for(url)
+        if au:
+            if dialect == 'html':
+                lines.append(f'🎵 <a href="{_html_escape(au)}">scarica audio</a>')
+            else:
+                lines.append(f"🎵 scarica audio: {cfg['wrap'](au)}")
 
     # Niente riga 📊 (durata/views/like/autore) e niente invito: card pulita.
     return "\n".join(lines)
