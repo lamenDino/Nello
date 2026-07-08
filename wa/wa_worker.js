@@ -181,7 +181,7 @@ async function handleMessages(sock, upsert) {
           });
 
           if (!info.success) {
-            if (info.skip_long) continue; // YouTube troppo lungo: lascia il link
+            if (info.skip_long) { didSend = true; continue; } // YouTube troppo lungo: lascia il link e cancellalo
             if (info.too_big) { await sock.sendMessage(jid, { text: info.caption }); continue; }
             await sock.sendMessage(jid, { text: `😵 Non riesco a scaricarlo.\n${info.error || ''}\n${url}` });
             continue;

@@ -1599,6 +1599,40 @@ async def health(request):
     return web.Response(text="OK")
 
 
+async def serve_link(request):
+    """Redirect breve '/l/<token>' -> URL originale del post."""
+    tok = request.match_info.get('tok', '')
+    url = core.link_url_by_token(tok)
+    if not url:
+        return web.Response(status=404, text="Link scaduto o non valido.")
+    raise web.HTTPFound(url)
+
+
+async def serve_play(request):
+    """Serve un'anteprima ascoltabile (audio/mpeg inline) per il link '/p/<token>'."""
+    tok = request.match_info.get('tok', '')
+    url = core.play_url_by_token(tok)
+    if not url:
+        return web.Response(status=404, text="Link audio scaduto o non valido.")
+    try:
+        info = await get_downloader().download_audio(url)
+    except Exception as e:
+        logger.warning(f"serve_play: download fallito ({url}): {e}")
+        info = None
+    path = (info or {}).get('file_path')
+    if not (info and info.get('success') and path and os.path.exists(path)):
+        return web.Response(status=502, text="Audio non disponibile per questo contenuto.")
+    try:
+        with open(path, 'rb') as fh:
+            data = fh.read()
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+    return web.Response(body=data, headers={'Content-Type': 'audio/mpeg'})
+
+
 async def serve_audio(request):
     """Serve l'audio del contenuto per il link '/a/<token>' della card. Scarica
     l'audio on-demand e lo restituisce come file mp3 (poi cancella il temporaneo)."""
@@ -1630,7 +1664,12 @@ async def serve_audio(request):
 
 async def run_web():
     app = web.Application()
-    app.add_routes([web.get("/", health), web.get("/a/{tok}", serve_audio)])
+    app.add_routes([
+        web.get("/", health),
+        web.get("/l/{tok}", serve_link),
+        web.get("/p/{tok}", serve_play),
+        web.get("/a/{tok}", serve_audio),
+    ])
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)

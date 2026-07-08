@@ -199,11 +199,9 @@ def build_client(ns):
             logger.debug(f"Discord achievement check: {e}")
 
     async def _send_media(channel, info, url, author):
-        """Invia video o carosello su Discord. Per replicare il layout di Telegram
-        (media SOPRA, info SOTTO), manda prima il media senza testo e poi la
-        didascalia come messaggio separato sotto: è su quest'ultimo che si vota,
-        così le reazioni finiscono proprio sotto le info. Ritorna il messaggio su
-        cui si vota, oppure None se non è stato inviato nulla."""
+        """Invia video o carosello su Discord. Usa UN SOLO messaggio: allegati +
+        contenuto, così possiamo integrare link puliti (apri originale / scarica
+        audio) senza spezzare la card. Su Discord il testo sta sopra il media."""
         import discord
         caption = core.build_caption(info, url, author.mention, info.get('title') or 'Contenuto',
                                      dialect='discord', invite=False, max_desc=1500)
@@ -267,12 +265,16 @@ def build_client(ns):
             pass
 
         try:
-            # 1) i media in cima, senza testo (Discord: max 10 allegati per messaggio)
+            # Discord: un unico messaggio con testo + allegati (max 10).
+            vote_msg = None
+            first = True
             for i in range(0, len(small), 10):
                 files = [discord.File(p) for p in small[i:i + 10]]
-                await channel.send(files=files)
-            # 2) le info sotto: questo è il messaggio su cui si vota
-            vote_msg = await channel.send(content=caption)
+                content = caption if first else None
+                m = await channel.send(content=content, files=files)
+                if first:
+                    vote_msg = m
+                    first = False
         except Exception as e:
             logger.warning(f"Discord invio media fallito ({url}): {e}")
             _clean_files([it['path'] for it in items])
@@ -459,7 +461,9 @@ def build_client(ns):
             await _handle_command(message)
             return
         tokens = [t.strip('<>') for t in content.split()]
-        urls = [t for t in tokens if ns.is_supported_link(t)]
+        # Accetta solo token che sono proprio URL supportati; prima bastava che il
+        # dominio comparisse da qualche parte e alcuni link casuali partivano lo stesso.
+        urls = [t for t in tokens if t.startswith(('http://', 'https://')) and ns.is_supported_link(t)]
         if urls:
             await _handle_links(message, urls)
 

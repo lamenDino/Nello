@@ -11,6 +11,7 @@ parti che li distinguono (mittente già renderizzato, icone, se mostrare l'invit
 """
 
 import os
+from urllib.parse import urlparse
 from html import escape as _html_escape
 
 VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
@@ -20,14 +21,19 @@ VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
 # WhatsApp (niente più bottone inline, che i caroselli non supportavano).
 AUDIO_BASE = (os.getenv('PUBLIC_URL') or os.getenv('RENDER_EXTERNAL_URL')
               or 'https://nello-9amr.onrender.com').rstrip('/')
+_LINK_BASE = f"{AUDIO_BASE}/l"
+_AUDIO_BASE = f"{AUDIO_BASE}/a"
+_PLAY_BASE = f"{AUDIO_BASE}/p"
 _audio_links = {}      # token -> url originale
 _audio_counter = [0]
+_play_links = {}       # token -> url originale (stream preview audio)
+_play_counter = [0]
 
 
 def audio_link_for(url: str):
-    """Registra l'url e ritorna il link accorciato '{base}/a/<token>' da mettere
+    """Registra l'url e ritorna il link corto '{base}/a/<token>' da mettere
     nella card. Il web server, quando lo apri, scarica e serve l'audio."""
-    if not AUDIO_BASE or not url:
+    if not _AUDIO_BASE or not url:
         return None
     _audio_counter[0] = (_audio_counter[0] + 1) % 1_000_000
     tok = format(_audio_counter[0], 'x')
@@ -35,11 +41,50 @@ def audio_link_for(url: str):
     if len(_audio_links) > 4000:  # prune semplice
         for k in list(_audio_links)[:2000]:
             _audio_links.pop(k, None)
-    return f"{AUDIO_BASE}/a/{tok}"
+    return f"{_AUDIO_BASE}/{tok}"
 
 
 def audio_url_by_token(tok: str):
     return _audio_links.get(tok)
+
+
+def play_link_for(url: str):
+    if not _PLAY_BASE or not url:
+        return None
+    _play_counter[0] = (_play_counter[0] + 1) % 1_000_000
+    tok = format(_play_counter[0], 'x')
+    _play_links[tok] = url
+    if len(_play_links) > 4000:
+        for k in list(_play_links)[:2000]:
+            _play_links.pop(k, None)
+    return f"{_PLAY_BASE}/{tok}"
+
+
+def play_url_by_token(tok: str):
+    return _play_links.get(tok)
+
+
+# --- Accorciatore link interno: '{base}/l/<token>' -> redirect all'originale ---
+# Usato su WhatsApp, dove non esistono i link con testo ("apri originale") e gli
+# URL lunghi dei post intasano la card.
+_short_links = {}
+_short_counter = [0]
+
+
+def short_link_for(url: str):
+    if not _LINK_BASE or not url:
+        return None
+    _short_counter[0] = (_short_counter[0] + 1) % 1_000_000
+    tok = format(_short_counter[0], 'x')
+    _short_links[tok] = url
+    if len(_short_links) > 4000:
+        for k in list(_short_links)[:2000]:
+            _short_links.pop(k, None)
+    return f"{_LINK_BASE}/{tok}"
+
+
+def link_url_by_token(tok: str):
+    return _short_links.get(tok)
 
 # Pool di icone "vivaci" pescate a caso (usate da Telegram per variare la didascalia).
 ICONS_VIDEO = ["🎬", "📹", "🎥", "🍿", "📺", "🎞️", "🕹️", "📀", "🎦"]
@@ -71,13 +116,12 @@ SPOILER_MIN_LEN = 120
 
 
 def short_url(url: str) -> str:
-    """Accorcia un URL per la card togliendo i parametri di tracking (?...#...).
-    YouTube fa eccezione: la query '?v=' è essenziale, quindi resta intera."""
-    if not url:
-        return url
-    if 'youtube.com' in url.lower():
-        return url
-    return url.split('?')[0].split('#')[0]
+    """URL corto da mostrare nella card.
+    - Telegram: usa sempre il testo 'apri originale' (gestito fuori da qui).
+    - Discord / WhatsApp: usa SEMPRE il redirect interno /l/<token> in stile bitly,
+      così la card non mostra mai URL lunghi o parametri di tracking.
+    """
+    return short_link_for(url) or url
 
 
 def detect_platform(url: str) -> str:
@@ -142,7 +186,8 @@ def human(n) -> str:
 
 def clean_title(raw: str, uploader: str = None) -> str:
     """Ripulisce il titolo da info ridondanti che alcune piattaforme (es. Facebook)
-    incollano dentro: prefisso 'NN views · NN reactions |' e suffisso '| Autore'."""
+    incollano dentro: prefisso 'NN views · NN reactions |', suffisso '| Autore' e
+    gli hashtag (#meme #sindaco... non dicono nulla, allungano solo la card)."""
     if not raw:
         return raw
     import re
@@ -150,6 +195,8 @@ def clean_title(raw: str, uploader: str = None) -> str:
     t = re.sub(r'^\s*[\d.,]+\s*[KMB]?\s*views?\b.*?\|\s*', '', t, flags=re.IGNORECASE)
     if uploader and str(uploader).lower() not in ('sconosciuto', 'none', ''):
         t = re.sub(r'\s*\|\s*' + re.escape(str(uploader)) + r'\s*$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'#[^\s#]+', '', t)          # via gli hashtag
+    t = re.sub(r'[ \t]{2,}', ' ', t)        # spazi doppi rimasti
     return t.strip(' |\n')
 
 
@@ -219,11 +266,15 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
     show_audio = (label == 'Video') or (label in ('Foto', 'Contenuto') and detect_platform(url) == 'TikTok')
     if show_audio:
         au = audio_link_for(url)
-        if au:
+        pl = play_link_for(url)
+        if au and pl:
             if dialect == 'html':
-                lines.append(f'🎵 <a href="{_html_escape(au)}">scarica audio</a>')
+                lines.append(
+                    f'🎵 <a href="{_html_escape(pl)}">▶️ ascolta</a> · '
+                    f'<a href="{_html_escape(au)}">⬇️ audio</a>'
+                )
             else:
-                lines.append(f"🎵 scarica audio: {cfg['wrap'](au)}")
+                lines.append(f"🎵 ▶️ ascolta: {cfg['wrap'](pl)} · ⬇️ audio: {cfg['wrap'](au)}")
 
     # Niente riga 📊 (durata/views/like/autore) e niente invito: card pulita.
     return "\n".join(lines)
