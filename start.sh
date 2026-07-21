@@ -5,9 +5,11 @@
 # po_token richiesti da YouTube sugli IP datacenter.
 
 BGUTIL_MAIN="/opt/bgutil/server/build/main.js"
+BGUTIL_NODE_MAX_OLD_SPACE_SIZE="${BGUTIL_NODE_MAX_OLD_SPACE_SIZE:-64}"
+WA_NODE_MAX_OLD_SPACE_SIZE="${WA_NODE_MAX_OLD_SPACE_SIZE:-128}"
 
 if [ -f "$BGUTIL_MAIN" ]; then
-    node "$BGUTIL_MAIN" --port 4416 >/tmp/bgutil.log 2>&1 &
+    node --max-old-space-size="$BGUTIL_NODE_MAX_OLD_SPACE_SIZE" "$BGUTIL_MAIN" --port 4416 >/tmp/bgutil.log 2>&1 &
     echo "bgutil po_token provider avviato su :4416 (pid $!)"
 else
     echo "ATTENZIONE: $BGUTIL_MAIN non trovato, il bot parte senza provider po_token"
@@ -18,7 +20,7 @@ fi
 # collegamento comparira' in questi log.
 if [ "$WHATSAPP_ENABLED" = "1" ]; then
     if [ -f "/app/wa/wa_worker.js" ]; then
-        node /app/wa/wa_worker.js >/tmp/wa_worker.log 2>&1 &
+        node --max-old-space-size="$WA_NODE_MAX_OLD_SPACE_SIZE" /app/wa/wa_worker.js >/tmp/wa_worker.log 2>&1 &
         echo "worker WhatsApp avviato (pid $!) - log: /tmp/wa_worker.log"
         # mostra i log del worker (incluso il QR) nello stream principale
         ( tail -n +1 -F /tmp/wa_worker.log & ) 2>/dev/null
