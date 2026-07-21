@@ -1012,19 +1012,30 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cached and await resend_from_cache(context, msg, cached, url):
             continue
 
-        # Feedback di caricamento differenziato per link
+        is_youtube = dl.detect_platform(url) == 'youtube'
         count_str = f"({i+1}/{len(valid_urls)})" if len(valid_urls) > 1 else ""
-        loading = await context.bot.send_message(
-            msg.chat_id, 
-            f"⏳ Download in corso {count_str}...\n🔗 {escape(url)}",
-            parse_mode=ParseMode.HTML
-        )
+        loading = None
+
+        async def show_loading():
+            nonlocal loading
+            if loading is None:
+                loading = await context.bot.send_message(
+                    msg.chat_id,
+                    f"⏳ Download in corso {count_str}...\n🔗 {escape(url)}",
+                    parse_mode=ParseMode.HTML
+                )
+
+        if not is_youtube:
+            await show_loading()
 
         try:
             # Timeout complessivo: evita che un download impallato (es. YouTube via
             # Deno/bgutil che si blocca) lasci il bot appeso su "Download in corso".
             try:
-                info = await asyncio.wait_for(dl.download_video(url), timeout=DOWNLOAD_TIMEOUT)
+                info = await asyncio.wait_for(
+                    dl.download_video(url, on_download_ready=show_loading if is_youtube else None),
+                    timeout=DOWNLOAD_TIMEOUT,
+                )
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout download ({DOWNLOAD_TIMEOUT}s) per {url}")
                 await note_download_failure(detect_platform(url), context)

@@ -157,8 +157,13 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         self.max_retries = 3
         self.retry_delay = 2
-        # YouTube: durata massima (secondi) oltre la quale NON si scarica (si lascia il link)
-        self.youtube_max_duration = int(os.getenv('YOUTUBE_MAX_DURATION', '180'))
+        # YouTube non scarica mai oltre 3 minuti. La variabile permette solo un
+        # limite piu' restrittivo, non di superare questo tetto.
+        try:
+            configured_youtube_limit = int(os.getenv('YOUTUBE_MAX_DURATION', '180'))
+        except ValueError:
+            configured_youtube_limit = 180
+        self.youtube_max_duration = min(max(configured_youtube_limit, 1), 180)
         self.debug = bool(debug)
         self._last_info = None
         if self.debug:
@@ -450,6 +455,33 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 return ydl.extract_info(url, download=False)
 
         return await loop.run_in_executor(None, _extract)
+
+    @staticmethod
+    def _youtube_duration_seconds(info: Dict) -> Optional[int]:
+        """Restituisce la durata YouTube in secondi, oppure None se non verificabile."""
+        value = info.get('duration')
+        if isinstance(value, bool):
+            value = None
+        if value is not None:
+            try:
+                duration = int(float(value))
+                if duration >= 0:
+                    return duration
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        duration_string = info.get('duration_string')
+        if not isinstance(duration_string, str):
+            return None
+        parts = duration_string.strip().split(':')
+        if len(parts) not in (2, 3) or not all(part.isdigit() for part in parts):
+            return None
+        values = [int(part) for part in parts]
+        if len(values) == 2:
+            minutes, seconds = values
+            return minutes * 60 + seconds if seconds < 60 else None
+        hours, minutes, seconds = values
+        return hours * 3600 + minutes * 60 + seconds if minutes < 60 and seconds < 60 else None
 
     def _pick_best_image_url(self, entry: Dict) -> Optional[Tuple[str, str]]:
         """
@@ -867,7 +899,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         return {'success': True, 'type': 'carousel', 'files': files,
                 'title': title, 'uploader': uploader, 'platform': platform, 'url': url}
 
-    async def download_video(self, url: str) -> Dict:
+    async def download_video(self, url: str, on_download_ready=None) -> Dict:
         """
         Main download.
         Ritorna:
@@ -919,10 +951,19 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 # YouTube: scarica solo i video <= 3 minuti; quelli più lunghi
                 # vengono lasciati come link in chat (skip_long).
                 if platform == 'youtube':
-                    dur = info.get('duration') or 0
-                    if dur and dur > self.youtube_max_duration:
-                        logger.info(f"YouTube {dur}s > {self.youtube_max_duration}s: lasciato come link.")
+                    dur = self._youtube_duration_seconds(info)
+                    if dur is None or dur > self.youtube_max_duration:
+                        reason = 'durata non verificabile' if dur is None else f'{dur}s > {self.youtube_max_duration}s'
+                        logger.info(f"YouTube {reason}: lasciato come link.")
                         return {'success': False, 'skip_long': True}
+
+                    if on_download_ready:
+                        try:
+                            callback_result = on_download_ready()
+                            if asyncio.iscoroutine(callback_result):
+                                await callback_result
+                        except Exception as e:
+                            logger.warning(f"Impossibile mostrare lo stato di download: {e}")
 
                 # 1) Se è carosello/playlist -> prova a scaricare immagini/video
                 if self._is_playlist_like(info):
@@ -989,6 +1030,12 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         # --- PHASE 2: EMERGENCY FALLBACKS ---
         logger.info("Entering Emergency Fallback Phase...")
+
+        # I fallback non forniscono una durata affidabile. Per YouTube non devono
+        # mai aggirare il limite dei tre minuti.
+        if platform == 'youtube':
+            logger.info("YouTube senza durata verificata: fallback bloccati.")
+            return {'success': False, 'skip_long': True}
 
         # 1. COBALT API (The Magic Bullet for No-Cookie environments)
         # Proviamo Cobalt per tutto (YouTube, Instagram, TikTok, Twitter, Facebook)
@@ -1062,6 +1109,15 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
     async def download_audio(self, url: str) -> Dict:
         """Estrae l'audio (MP3) dal contenuto. Usato dal bottone 'Audio'."""
         clean_url = self.clean_url(url)
+        if self.detect_platform(clean_url) == 'youtube':
+            try:
+                info = await self.extract_info(clean_url)
+            except Exception:
+                info = None
+            duration = self._youtube_duration_seconds(info or {})
+            if duration is None or duration > self.youtube_max_duration:
+                return {'success': False, 'error': 'Audio disponibile solo per video YouTube di massimo 3 minuti.'}
+
         opts = self.get_ydl_opts(clean_url, 0)
         opts['format'] = 'bestaudio/best'
         opts['outtmpl'] = os.path.join(self.temp_dir, 'audio_%(id)s.%(ext)s')
