@@ -246,9 +246,7 @@ def build_client(ns):
 
         small = [it['path'] for it in items if it['size'] <= limit]
         if not small:
-            await channel.send(
-                f"🐘 Troppo pesante per Discord anche dopo la compressione (>{DISCORD_MAX_MB:.0f}MB).\n{caption}"
-            )
+            logger.warning('Discord media exceeds limit after compression (%s): %sMB', url, DISCORD_MAX_MB)
             _clean_files([it['path'] for it in items])
             return None
 
@@ -303,8 +301,9 @@ def build_client(ns):
                 try:
                     info = await asyncio.wait_for(dl.download_video(url), timeout=download_timeout)
                 except asyncio.TimeoutError:
+                    logger.warning('Discord download timeout: %s', url)
                     if loading:
-                        await loading.edit(content=f"⏳ Ci ho messo troppo su questo link, ho mollato.\n🔗 <{url}>")
+                        await loading.delete()
                     continue
 
                 if info and (info.get('skip_long') or info.get('skip_unverified')):
@@ -318,8 +317,9 @@ def build_client(ns):
 
                 if not info or not info.get('success'):
                     err = (info or {}).get('error', 'Errore sconosciuto')
+                    logger.warning('Discord download failed (%s): %s', url, err)
                     if loading:
-                        await loading.edit(content=f"😵 Non sono riuscito a scaricarlo.\n⚠️ {err}\n🔗 <{url}>")
+                        await loading.delete()
                     continue
 
                 vote_msg = await _send_media(channel, info, url, author)
@@ -347,7 +347,7 @@ def build_client(ns):
                 logger.error(f"Discord handle link error ({url}): {e}")
                 if loading:
                     try:
-                        await loading.edit(content=f"😵 Errore su questo link.\n🔗 <{url}>")
+                        await loading.delete()
                     except Exception:
                         pass
 

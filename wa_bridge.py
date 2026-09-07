@@ -109,7 +109,7 @@ def build_app(ns):
                                      dialect='whatsapp', invite=False, max_desc=1500)
 
         if any(f.get('document') for f in files):
-            caption += '\n📎 Video originale allegato come file: conversione WhatsApp non riuscita.'
+            caption += '\n📎 Video originale allegato come file.'
         oversized = any(f['size'] > (50 * 1024 * 1024 if f.get('document') else WHATSAPP_MAX_BYTES)
                         for f in files)
         if oversized:

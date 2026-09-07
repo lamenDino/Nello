@@ -182,9 +182,9 @@ async function handleMessages(sock, upsert) {
           });
 
           if (!info.success) {
+            keepOriginal = true;
             if (info.skip_long || info.skip_unverified) { keepOriginal = true; continue; }
-            if (info.too_big) { await sock.sendMessage(jid, { text: info.caption }); continue; }
-            await sock.sendMessage(jid, { text: `😵 Non riesco a scaricarlo.\n${info.error || ''}\n${url}` });
+            console.log('WA: download non inviato:', url, '-', info.error || (info.too_big ? 'file troppo grande' : 'errore sconosciuto'));
             continue;
           }
 
@@ -237,6 +237,7 @@ async function handleMessages(sock, upsert) {
             }
           } catch (e) { /* ignora */ }
         } catch (e) {
+          keepOriginal = true;
           console.log('WA: errore su', url, '-', e.message);
         }
       }

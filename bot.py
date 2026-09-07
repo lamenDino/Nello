@@ -585,16 +585,7 @@ async def note_download_failure(platform: str, context):
         return
     _last_alert[platform] = now
     try:
-        await context.bot.send_message(
-            chat_id=await effective_admin_id(),
-            text=(
-                f"⚠️ <b>Attenzione admin</b>\n"
-                f"{platform} ha fallito {_fail_streak[platform]} download di fila.\n"
-                f"Probabile causa: <b>cookie {platform} scaduti</b>. "
-                f"Rigenera ed aggiorna il secret file su Render."
-            ),
-            parse_mode=ParseMode.HTML,
-        )
+        logger.warning("Telegram consecutive download failures: platform=%s count=%s", platform, _fail_streak[platform])
     except Exception:
         pass
 
@@ -1040,11 +1031,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Timeout download ({DOWNLOAD_TIMEOUT}s) per {url}")
                 await note_download_failure(detect_platform(url), context)
                 try:
-                    await context.bot.send_message(
-                        chat_id=msg.chat_id,
-                        text=f"⏳ <b>Ci ho messo troppo</b> e ho mollato il colpo su questo link. Riprova tra poco.\n(Link: {escape(url)})",
-                        parse_mode=ParseMode.HTML,
-                    )
+                    logger.warning("Telegram media failure (%s): %s", url, 'timeout')
                 except Exception:
                     pass
                 try:
@@ -1063,18 +1050,13 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ❌ fallimento → informa l'utente e passa al prossimo
             if not info or not info.get("success"):
-                nello_joke = random.choice(NELLO_ERRORS)
-                specific_error = info.get('error', 'Errore sconosciuto')
+                specific_error = (info or {}).get('error', 'Errore sconosciuto')
 
                 # Traccia il fallimento per avvisare l'admin se è sistematico (cookie scaduti)
                 await note_download_failure(detect_platform(url), context)
 
                 try:
-                    await context.bot.send_message(
-                        chat_id=msg.chat_id,
-                        text=f"{nello_joke}\n\n⚠️ <i>{escape(specific_error)}</i>\n(Link: {escape(url)})",
-                        parse_mode=ParseMode.HTML
-                    )
+                    logger.warning("Telegram media failure (%s): %s", url, specific_error)
                 except Exception:
                     pass
                 try:
@@ -1084,7 +1066,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             # Controllo dimensione: la Bot API di Telegram rifiuta gli upload > 50MB.
-            # Meglio un messaggio chiaro che un errore criptico durante l'invio.
+            # Registra il problema nei log senza aggiungere messaggi in chat.
             if info.get("type", "video") == "video":
                 candidate_paths = [info.get("file_path")]
             else:
@@ -1096,17 +1078,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 None
             )
             if oversized:
-                size_mb = os.path.getsize(oversized) / (1024 * 1024)
                 try:
-                    await context.bot.send_message(
-                        chat_id=msg.chat_id,
-                        text=(
-                            f"🐘 <b>Troppo pesante per Nello!</b>\n\n"
-                            f"Il file ({size_mb:.0f}MB) supera il limite di 50MB di Telegram "
-                            f"per i bot, non posso inviarlo.\n(Link: {escape(url)})"
-                        ),
-                        parse_mode=ParseMode.HTML,
-                    )
+                    logger.warning("Telegram media failure (%s): %s", url, 'file troppo grande')
                 except Exception:
                     pass
                 for p in candidate_paths:
@@ -1224,10 +1197,10 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      captured.append(_fc)
                              except Exception as inner_e:
                                  logger.error(f"Error sending single item matching caption retry: {inner_e}")
-                                 await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (errore imprevisto).")
+                                 logger.warning("Telegram media failure (%s): %s", url, 'invio media fallito')
                         else:
                             logger.error(f"Error sending single carousel item: {e}")
-                            await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio del media.")
+                            logger.warning("Telegram media failure (%s): %s", url, 'invio media fallito')
                     finally:
                          try:
                             os.remove(photo_path)
@@ -1305,10 +1278,10 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                                    captured.append(_fc)
                                        except Exception as inner_e:
                                            logger.error(f"Failed retry sending media group: {inner_e}")
-                                           await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio (didascalia troppo lunga).")
+                                           logger.warning("Telegram media failure (%s): %s", url, 'invio media fallito')
                                else:
                                     logger.error(f"Send media group error: {e}")
-                                    await context.bot.send_message(msg.chat_id, "⚠️ Errore nell'invio dell'album.")
+                                    logger.warning("Telegram media failure (%s): %s", url, 'invio media fallito')
 
                         finally:
                             # Chiudi handle e cancella file
@@ -1373,7 +1346,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Errore critico durante loop {url}: {e}", exc_info=True)
             try:
-                await context.bot.send_message(msg.chat_id, f"❌ Si è verificato un errore imprevisto su {url}.")
+                logger.warning("Telegram media failure (%s): %s", url, 'invio media fallito')
             except Exception:
                 pass
             try:
