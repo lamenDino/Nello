@@ -87,7 +87,8 @@ def build_app(ns):
             for f in files:
                 if f['video']:
                     source = f['path']
-                    f['path'] = await asyncio.to_thread(prepare_video, source)
+                    f['path'] = await asyncio.to_thread(prepare_video, source,
+                                                       max_bytes=WHATSAPP_MAX_BYTES)
                     f['size'] = os.path.getsize(f['path'])
                     os.remove(source)
         except Exception as e:
