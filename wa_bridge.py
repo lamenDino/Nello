@@ -44,6 +44,8 @@ _last_notify = [0.0]  # timestamp ultimo avviso admin (anti-spam)
 def build_app(ns):
     from social_downloader import SocialMediaDownloader
     dl = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
+    dl.delivery_platform = 'whatsapp'
+    dl.delivery_max_bytes = WHATSAPP_MAX_BYTES
     # Prefer ready-to-send H.264 for WhatsApp, including TikTok HEVC sources.
     dl.base_opts['format'] = (
         'best[ext=mp4][vcodec~="^(avc1|h264)"][acodec!=none]/'
@@ -80,6 +82,7 @@ def build_app(ns):
         for p in paths:
             if p and os.path.exists(p):
                 files.append({'path': os.path.abspath(p),
+                              'document': p in info.get('_documents', []),
                               'video': os.path.splitext(p)[1].lower() in VIDEO_EXTS,
                               'size': os.path.getsize(p)})
         if not files:
@@ -88,7 +91,7 @@ def build_app(ns):
         # Normalize every video, including Facebook and carousel fallbacks.
         # Run outside the bridge event loop so auth/ping/react remain available.
         for f in files:
-            if f['video']:
+            if f['video'] and not info.get('_delivery_prepared'):
                 try:
                     source = f['path']
                     f['path'] = await asyncio.to_thread(prepare_video, source,

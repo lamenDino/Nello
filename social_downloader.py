@@ -919,6 +919,11 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         - success True & video => {success: True, type:'video', file_path:'...', title/uploader/platform/url}
         - success True & carousel => {success: True, type:'carousel', files:[...], title/uploader/platform/url}
         """
+        if os.getenv('DOWNLOADER_URL'):
+            from remote_downloader import remote_download
+            return await remote_download(url, target=getattr(self, 'delivery_platform', ''),
+                                         max_bytes=getattr(self, 'delivery_max_bytes', 16 * 1024 * 1024),
+                                         on_download_ready=on_download_ready)
         clean_url = self.clean_url(url)
         platform = self.detect_platform(clean_url)
         if platform == 'youtube':
@@ -1139,6 +1144,9 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         return {'success': False, 'error': 'Download fallito dopo multiple tentativi. Riprova più tardi.'}
 
     async def download_audio(self, url: str) -> Dict:
+        if os.getenv('DOWNLOADER_URL'):
+            from remote_downloader import remote_download
+            return await remote_download(url, kind='audio')
         """Estrae l'audio (MP3) dal contenuto. Usato dal bottone 'Audio'."""
         clean_url = self.clean_url(url)
         if self.detect_platform(clean_url) == 'youtube':

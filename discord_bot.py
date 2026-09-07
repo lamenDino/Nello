@@ -170,6 +170,8 @@ def build_client(ns):
     # il downloader del bot Telegram quando scaricano in contemporanea).
     from social_downloader import SocialMediaDownloader
     dl = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
+    dl.delivery_platform = 'discord'
+    dl.delivery_max_bytes = int(DISCORD_MAX_BYTES * 0.95)
 
     download_timeout = int(os.getenv('DOWNLOAD_TIMEOUT', '300'))
 
@@ -226,7 +228,7 @@ def build_client(ns):
         compressed_any = False
         notice = None
         for it in items:
-            if it['video'] and it['size'] > limit:
+            if it['video'] and it['size'] > limit and not info.get('_delivery_prepared'):
                 if notice is None:
                     try:
                         notice = await channel.send("🗜️ Il video è pesante, lo comprimo per Discord… un attimo")
