@@ -1054,7 +1054,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             # ⏭️ YouTube troppo lungo: lascia il link in chat senza dire nulla
-            if info and info.get("skip_long"):
+            if info and (info.get("skip_long") or info.get("skip_unverified")):
                 try:
                     await loading.delete()
                 except Exception:

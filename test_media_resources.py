@@ -92,18 +92,27 @@ class DownloaderTests(unittest.IsolatedAsyncioTestCase):
         async def fail(*args):
             raise RuntimeError('solver failed')
         dl.extract_info = fail
-        result = await dl.download_video('https://www.youtube.com/shorts/example')
+        with patch('social_downloader.youtube_duration', return_value=72):
+            result = await dl.download_video('https://www.youtube.com/shorts/example')
         self.assertFalse(result['success'])
         self.assertIn('error', result)
         self.assertNotIn('skip_long', result)
 
     async def test_long_video_still_skipped_before_download(self):
         dl = self.downloader()
-        async def metadata(*args):
-            return {'duration': 181}
-        dl.extract_info = metadata
-        result = await dl.download_video('https://www.youtube.com/shorts/example')
+        dl.extract_info = AsyncMock()
+        with patch('social_downloader.youtube_duration', return_value=181):
+            result = await dl.download_video('https://www.youtube.com/shorts/example')
         self.assertTrue(result['skip_long'])
+        dl.extract_info.assert_not_awaited()
+
+    async def test_unknown_duration_does_not_start_extraction(self):
+        dl = self.downloader()
+        dl.extract_info = AsyncMock()
+        with patch('social_downloader.youtube_duration', return_value=None):
+            result = await dl.download_video('https://www.youtube.com/shorts/example')
+        self.assertTrue(result['skip_unverified'])
+        dl.extract_info.assert_not_awaited()
 
 
 if __name__ == '__main__':

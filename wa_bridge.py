@@ -67,8 +67,8 @@ def build_app(ns):
             logger.warning(f"WA bridge download error ({url}): {e}")
             return web.json_response({'success': False, 'error': str(e)[:200]})
 
-        if info and info.get('skip_long'):
-            return web.json_response({'success': False, 'skip_long': True})
+        if info and (info.get('skip_long') or info.get('skip_unverified')):
+            return web.json_response(info)
         if not info or not info.get('success'):
             return web.json_response({'success': False, 'error': (info or {}).get('error', 'errore')})
 

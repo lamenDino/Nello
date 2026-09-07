@@ -30,6 +30,7 @@ import re
 import html
 from media_resources import limited_media
 from youtube_job import run_youtube_job, YouTubeResourceError
+from youtube_duration import youtube_duration
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -920,6 +921,15 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         """
         clean_url = self.clean_url(url)
         platform = self.detect_platform(clean_url)
+        if platform == 'youtube':
+            duration = await asyncio.to_thread(youtube_duration, clean_url)
+            if duration is None:
+                logger.info('YouTube duration unavailable: left as link, no extraction attempted.')
+                return {'success': False, 'skip_unverified': True}
+            if duration > self.youtube_max_duration:
+                logger.info('YouTube duration %.1fs exceeds %ss: no extraction attempted.',
+                            duration, self.youtube_max_duration)
+                return {'success': False, 'skip_long': True}
         # Azzera il titolo dei fallback (il downloader è un singleton: evita titoli "vecchi")
         self.last_fallback_title = None
 
@@ -1128,6 +1138,9 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         """Estrae l'audio (MP3) dal contenuto. Usato dal bottone 'Audio'."""
         clean_url = self.clean_url(url)
         if self.detect_platform(clean_url) == 'youtube':
+            duration = await asyncio.to_thread(youtube_duration, clean_url)
+            if duration is None or duration > self.youtube_max_duration:
+                return {'success': False, 'error': 'Audio disponibile solo per video YouTube di massimo 3 minuti.'}
             try:
                 info = await self.extract_info(clean_url)
             except Exception:

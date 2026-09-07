@@ -171,6 +171,7 @@ async function handleMessages(sock, upsert) {
       const ownerName = m.pushName || 'Utente';
 
       let didSend = false;
+      let keepOriginal = false;
       for (const url of urls) {
         try {
           await sock.sendPresenceUpdate('composing', jid).catch(() => {});
@@ -181,7 +182,7 @@ async function handleMessages(sock, upsert) {
           });
 
           if (!info.success) {
-            if (info.skip_long) { didSend = true; continue; } // YouTube troppo lungo: lascia il link e cancellalo
+            if (info.skip_long || info.skip_unverified) { keepOriginal = true; continue; }
             if (info.too_big) { await sock.sendMessage(jid, { text: info.caption }); continue; }
             await sock.sendMessage(jid, { text: `😵 Non riesco a scaricarlo.\n${info.error || ''}\n${url}` });
             continue;
@@ -242,7 +243,7 @@ async function handleMessages(sock, upsert) {
 
       // Cancella il messaggio originale col link (come Telegram/Discord). Su
       // WhatsApp serve che il bot sia ADMIN del gruppo, altrimenti fallisce.
-      if (didSend) {
+      if (didSend && !keepOriginal) {
         try {
           await sock.sendMessage(jid, { delete: m.key });
         } catch (e) {

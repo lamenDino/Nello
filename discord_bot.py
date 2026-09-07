@@ -307,7 +307,7 @@ def build_client(ns):
                         await loading.edit(content=f"⏳ Ci ho messo troppo su questo link, ho mollato.\n🔗 <{url}>")
                     continue
 
-                if info and info.get('skip_long'):
+                if info and (info.get('skip_long') or info.get('skip_unverified')):
                     # YouTube troppo lungo: lascia solo il link
                     if loading:
                         try:
