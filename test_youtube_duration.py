@@ -1,9 +1,25 @@
 import json
 import unittest
-from youtube_duration import video_id, parse_duration
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
+from youtube_duration import video_id, parse_duration, youtube_duration
 
 
 class DurationTests(unittest.TestCase):
+    def test_duration_uses_configured_youtube_cookies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cookiefile = Path(directory) / 'cookies.txt'
+            cookiefile.write_text('# Netscape HTTP Cookie File\n'
+                                  '.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\ttest-only\n')
+            page = 'var ytInitialPlayerResponse = ' + json.dumps({
+                'videoDetails': {'videoId': 'Pq2ArYdUzQo', 'lengthSeconds': '72'}})
+            with patch('youtube_duration.requests.get') as get:
+                get.return_value.__enter__.return_value.iter_content.return_value = [page.encode()]
+                self.assertEqual(youtube_duration('https://youtu.be/Pq2ArYdUzQo', str(cookiefile)), 72)
+                cookies = list(get.call_args.kwargs['cookies'])
+                self.assertEqual([(c.domain, c.name) for c in cookies], [('.youtube.com', 'SID')])
+
     def test_url_variants(self):
         for url in ('https://youtu.be/Pq2ArYdUzQo',
                     'https://www.youtube.com/watch?v=Pq2ArYdUzQo&t=3',

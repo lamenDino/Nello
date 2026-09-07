@@ -922,10 +922,14 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         clean_url = self.clean_url(url)
         platform = self.detect_platform(clean_url)
         if platform == 'youtube':
-            duration = await asyncio.to_thread(youtube_duration, clean_url)
+            duration = await asyncio.to_thread(youtube_duration, clean_url,
+                                              getattr(self, 'youtube_cookies', None),
+                                              getattr(self, 'proxy_dict', None))
             if duration is None:
                 logger.info('YouTube duration unavailable: left as link, no extraction attempted.')
-                return {'success': False, 'skip_unverified': True}
+                return {'success': False, 'error': (
+                    'YouTube non permette di verificare la durata di questo video. '
+                    'Non avvio il download: il link resta disponibile.')}
             if duration > self.youtube_max_duration:
                 logger.info('YouTube duration %.1fs exceeds %ss: no extraction attempted.',
                             duration, self.youtube_max_duration)
@@ -1138,7 +1142,9 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         """Estrae l'audio (MP3) dal contenuto. Usato dal bottone 'Audio'."""
         clean_url = self.clean_url(url)
         if self.detect_platform(clean_url) == 'youtube':
-            duration = await asyncio.to_thread(youtube_duration, clean_url)
+            duration = await asyncio.to_thread(youtube_duration, clean_url,
+                                              getattr(self, 'youtube_cookies', None),
+                                              getattr(self, 'proxy_dict', None))
             if duration is None or duration > self.youtube_max_duration:
                 return {'success': False, 'error': 'Audio disponibile solo per video YouTube di massimo 3 minuti.'}
             try:

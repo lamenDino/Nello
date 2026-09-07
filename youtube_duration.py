@@ -1,9 +1,14 @@
 """Read duration from the watch page without loading players or media formats."""
 import json
+import http.cookiejar
+import logging
+import os
 import re
 from urllib.parse import urlsplit, parse_qs
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def video_id(url):
@@ -35,13 +40,22 @@ def parse_duration(page, expected_id):
     return None
 
 
-def youtube_duration(url):
+def youtube_duration(url, cookiefile=None, proxies=None):
     ident = video_id(url)
     if not ident:
         return None
+    cookies = None
+    if cookiefile and os.path.exists(cookiefile):
+        cookies = http.cookiejar.MozillaCookieJar(cookiefile)
+        try:
+            cookies.load(ignore_discard=True, ignore_expires=False)
+        except (OSError, http.cookiejar.LoadError):
+            logger.warning('YouTube duration: invalid cookie file')
+            cookies = None
     try:
         with requests.get('https://www.youtube.com/watch', params={'v': ident},
                           headers={'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'en-US'},
+                          cookies=cookies, proxies=proxies,
                           stream=True, timeout=(5, 10)) as response:
             response.raise_for_status()
             content = bytearray()
@@ -49,6 +63,10 @@ def youtube_duration(url):
                 content.extend(chunk)
                 if len(content) >= 2 * 1024 * 1024:
                     break
-            return parse_duration(content.decode('utf-8', errors='replace'), ident)
-    except requests.RequestException:
+            duration = parse_duration(content.decode('utf-8', errors='replace'), ident)
+            logger.info('YouTube duration preflight: id=%s duration=%s authenticated_cookies=%s',
+                        ident, duration, bool(cookies))
+            return duration
+    except requests.RequestException as exc:
+        logger.warning('YouTube duration request failed: %s', type(exc).__name__)
         return None

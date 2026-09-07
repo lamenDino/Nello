@@ -111,7 +111,7 @@ class DownloaderTests(unittest.IsolatedAsyncioTestCase):
         dl.extract_info = AsyncMock()
         with patch('social_downloader.youtube_duration', return_value=None):
             result = await dl.download_video('https://www.youtube.com/shorts/example')
-        self.assertTrue(result['skip_unverified'])
+        self.assertIn('verificare la durata', result['error'])
         dl.extract_info.assert_not_awaited()
 
 
