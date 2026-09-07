@@ -5,7 +5,10 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+import json
+import subprocess
 
 from media_resources import limited_media
 from social_downloader import SocialMediaDownloader
@@ -41,6 +44,27 @@ class ResourceTests(unittest.TestCase):
 
 
 class DownloaderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_whatsapp_timeout_preserves_original_as_document(self):
+        import wa_bridge
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'original.mp4'
+            source.write_bytes(b'original contents')
+            with patch('social_downloader.SocialMediaDownloader') as factory, \
+                    patch('wa_bridge.prepare_video', side_effect=subprocess.TimeoutExpired('ffmpeg', 180)):
+                dl = factory.return_value
+                dl.base_opts = {'format': 'best'}
+                dl.download_video = AsyncMock(return_value={
+                    'success': True, 'type': 'video', 'file_path': str(source)})
+                app = wa_bridge.build_app(SimpleNamespace(ranking_store=None))
+                handler = next(route.handler for route in app.router.routes()
+                               if route.resource.canonical == '/download')
+                response = await handler(SimpleNamespace(json=AsyncMock(return_value={
+                    'url': 'https://www.tiktok.com/@test/video/123', 'sender_name': 'Test'})))
+                result = json.loads(response.body)
+                self.assertTrue(result['success'])
+                self.assertTrue(result['files'][0]['document'])
+                self.assertEqual(Path(result['files'][0]['path']).read_bytes(), b'original contents')
+
     def downloader(self):
         dl = SocialMediaDownloader.__new__(SocialMediaDownloader)
         dl.max_retries = 1

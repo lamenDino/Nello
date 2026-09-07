@@ -44,6 +44,10 @@ _last_notify = [0.0]  # timestamp ultimo avviso admin (anti-spam)
 def build_app(ns):
     from social_downloader import SocialMediaDownloader
     dl = SocialMediaDownloader(debug=os.getenv('SMD_DEBUG', '0') == '1')
+    # Prefer ready-to-send H.264 for WhatsApp, including TikTok HEVC sources.
+    dl.base_opts['format'] = (
+        'best[ext=mp4][vcodec~="^(avc1|h264)"][acodec!=none]/'
+        + dl.base_opts['format'])
     rs = ns.ranking_store
 
     async def download(request):
@@ -83,25 +87,20 @@ def build_app(ns):
 
         # Normalize every video, including Facebook and carousel fallbacks.
         # Run outside the bridge event loop so auth/ping/react remain available.
-        try:
-            for f in files:
-                if f['video']:
+        for f in files:
+            if f['video']:
+                try:
                     source = f['path']
                     f['path'] = await asyncio.to_thread(prepare_video, source,
                                                        max_bytes=WHATSAPP_MAX_BYTES)
                     f['size'] = os.path.getsize(f['path'])
                     os.remove(source)
-        except Exception as e:
-            logger.warning('WA video preparation failed: %s', type(e).__name__)
-            for f in files:
-                try:
-                    os.remove(f['path'])
-                except OSError:
-                    pass
-            return web.json_response({
-                'success': False,
-                'error': 'Video non convertibile per WhatsApp. Riprova con il link originale.',
-            })
+                except Exception as e:
+                    logger.warning('WA video preparation failed: %s; sending original as document',
+                                   type(e).__name__)
+                    f['path'] = source
+                    f['size'] = os.path.getsize(source)
+                    f['document'] = True
 
         has_video = any(f['video'] for f in files)
         has_photo = any(not f['video'] for f in files)
@@ -109,7 +108,10 @@ def build_app(ns):
         caption = core.build_caption(info, url, sender_name or '', info.get('title') or 'Contenuto',
                                      dialect='whatsapp', invite=False, max_desc=1500)
 
-        oversized = any(f['size'] > WHATSAPP_MAX_BYTES for f in files)
+        if any(f.get('document') for f in files):
+            caption += '\n📎 Video originale allegato come file: conversione WhatsApp non riuscita.'
+        oversized = any(f['size'] > (50 * 1024 * 1024 if f.get('document') else WHATSAPP_MAX_BYTES)
+                        for f in files)
         if oversized:
             # WhatsApp non gradisce file troppo grandi: il worker manderà solo il link
             for f in files:

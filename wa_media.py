@@ -32,17 +32,20 @@ def prepare_video(path, timeout=180, max_bytes=16 * 1024 * 1024):
         audio = next((s for s in metadata['streams'] if s['codec_type'] == 'audio'), None)
         compatible = (video.get('codec_name') == 'h264'
                       and video.get('pix_fmt') == 'yuv420p'
-                      and max(video.get('width', 0), video.get('height', 0)) <= 1920
-                      and (not audio or (audio.get('codec_name') == 'aac'
-                                         and audio.get('channels', 0) <= 2)))
+                      and max(video.get('width', 0), video.get('height', 0)) <= 1920)
+        audio_compatible = not audio or (audio.get('codec_name') == 'aac'
+                                        and audio.get('channels', 0) <= 2)
         copy_streams = compatible and os.path.getsize(path) <= max_bytes * 0.95
         cmd = [
             'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
-            '-xerror', '-y', '-threads', '1', '-i', os.path.abspath(path),
+            '-xerror', '-y', '-threads', '1', '-filter_threads', '1',
+            '-filter_complex_threads', '1', '-i', os.path.abspath(path),
             '-map', '0:v:0', '-map', '0:a:0?', '-map_metadata', '-1',
         ]
         if copy_streams:
-            cmd += ['-c', 'copy']
+            cmd += ['-c:v', 'copy']
+            cmd += (['-c:a', 'copy'] if audio_compatible else
+                    ['-c:a', 'aac', '-ac', '2', '-ar', '48000', '-b:a', '96k'])
         else:
             duration = float(metadata.get('format', {}).get('duration') or video.get('duration') or 0)
             audio_rate = 96000 if audio else 0
@@ -58,8 +61,10 @@ def prepare_video(path, timeout=180, max_bytes=16 * 1024 * 1024):
                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ac', '2', '-ar', '48000',
                 '-b:a', '96k',
             ]
-        logger.info('WA video preparation: mode=%s input_bytes=%s',
-                    'remux' if copy_streams else 'encode', os.path.getsize(path))
+        logger.info('WA video preparation: mode=%s input_bytes=%s codec=%s audio=%s dimensions=%sx%s',
+                    'remux' if copy_streams else 'encode', os.path.getsize(path),
+                    video.get('codec_name'), (audio or {}).get('codec_name'),
+                    video.get('width'), video.get('height'))
         cmd += ['-movflags', '+faststart', output]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                        timeout=max(1, timeout - (time.monotonic() - started)))
