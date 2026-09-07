@@ -28,6 +28,7 @@ import requests
 import json
 import re
 import html
+from media_resources import limited_media
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -273,22 +274,21 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             # Formato richiesto da yt-dlp: dict {runtime: {config}}.
             opts['js_runtimes'] = {'deno': {}}
 
-            # Attempt 0: 'tv' (veloce, evita SABR) + web/mweb come copertura nella stessa
-            # passata (alcuni video sono disponibili solo su certi client).
+            # Un client per tentativo: evita di accumulare player e sfide JS.
             if attempt == 0:
-                opts['extractor_args'] = {'youtube': {'player_client': ['tv', 'mweb', 'web']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['tv']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
-            # Attempt 1: client web autenticati di ripiego
+            # Attempt 1: client mobile web autenticato di ripiego.
             elif attempt == 1:
-                opts['extractor_args'] = {'youtube': {'player_client': ['web_safari', 'mweb', 'web']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['mweb']}}
                 if has_yt_cookies:
                     opts['cookiefile'] = self.youtube_cookies
 
-            # Attempt 2: android/ios senza cookies (utile se l'IP non e' flaggato)
+            # Attempt 2: Android VR senza cookie.
             else:
-                opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios', 'tv']}}
+                opts['extractor_args'] = {'youtube': {'player_client': ['android_vr']}}
 
         # Facebook
         if 'facebook' in url.lower() or 'fb.' in url.lower():
@@ -450,6 +450,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         loop = asyncio.get_event_loop()
 
+        @limited_media
         def _extract():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)
@@ -785,7 +786,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
 
 
-    async def download_with_ytdlp(self, url: str, attempt: int = 0) -> Optional[str]:
+    async def download_with_ytdlp(self, url: str, attempt: int = 0, info: Dict = None) -> Optional[str]:
         """Download singolo (video) con yt-dlp"""
         try:
             opts = self.get_ydl_opts(url, attempt)
@@ -795,10 +796,13 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
             
             loop = asyncio.get_event_loop()
 
+            @limited_media
             def _download():
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([url])
-                    info2 = ydl.extract_info(url, download=False)
+                    # Reuse the metadata already fetched and duration-checked.
+                    # Avoid two additional player/JS challenge extractions.
+                    info2 = (ydl.process_ie_result(dict(info), download=True) if info
+                             else ydl.extract_info(url, download=True))
                     return ydl.prepare_filename(info2)
 
             filename = await loop.run_in_executor(None, _download)
@@ -952,9 +956,10 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                 # vengono lasciati come link in chat (skip_long).
                 if platform == 'youtube':
                     dur = self._youtube_duration_seconds(info)
-                    if dur is None or dur > self.youtube_max_duration:
-                        reason = 'durata non verificabile' if dur is None else f'{dur}s > {self.youtube_max_duration}s'
-                        logger.info(f"YouTube {reason}: lasciato come link.")
+                    if dur is None:
+                        return {'success': False, 'error': 'Impossibile verificare la durata YouTube. Riprova tra poco.'}
+                    if dur > self.youtube_max_duration:
+                        logger.info(f"YouTube {dur}s > {self.youtube_max_duration}s: lasciato come link.")
                         return {'success': False, 'skip_long': True}
 
                     if on_download_ready:
@@ -976,7 +981,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                         self._save_debug_info('carousel_no_items')
 
                 # 2) Prova come video singolo
-                file_path = await self.download_with_ytdlp(clean_url, attempt)
+                file_path = await self.download_with_ytdlp(clean_url, attempt, info=info)
                 if not file_path or not os.path.exists(file_path):
                     if attempt < self.max_retries - 1:
                         delay = self.retry_delay * (2 ** attempt)
@@ -1014,6 +1019,9 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                         '🔒 Questo video non è disponibile: potrebbe essere privato, rimosso, '
                         'o riservato (età/area geografica). YouTube non lo concede.'
                     )}
+                if platform == 'youtube' and attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay)
+                    continue
                 if 'sign in' in err or 'bot' in err:
                     logger.warning("Bot detection! Breaking to shortcuts.")
                     break # break to safe fallbacks
@@ -1035,7 +1043,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
         # mai aggirare il limite dei tre minuti.
         if platform == 'youtube':
             logger.info("YouTube senza durata verificata: fallback bloccati.")
-            return {'success': False, 'skip_long': True}
+            return {'success': False, 'error': 'YouTube non ha completato il download. Riprova tra poco.'}
 
         # 1. COBALT API (The Magic Bullet for No-Cookie environments)
         # Proviamo Cobalt per tutto (YouTube, Instagram, TikTok, Twitter, Facebook)
@@ -1131,6 +1139,7 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         loop = asyncio.get_event_loop()
 
+        @limited_media
         def _dl():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(clean_url, download=True)

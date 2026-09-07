@@ -6,10 +6,12 @@ import logging
 import subprocess
 import tempfile
 import time
+from media_resources import limited_media
 
 logger = logging.getLogger(__name__)
 
 
+@limited_media
 def prepare_video(path, timeout=180, max_bytes=16 * 1024 * 1024):
     """Return a new H.264/AAC MP4; leave the source intact on failure.
 

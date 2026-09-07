@@ -7,6 +7,9 @@
 BGUTIL_MAIN="/opt/bgutil/server/build/main.js"
 BGUTIL_NODE_MAX_OLD_SPACE_SIZE="${BGUTIL_NODE_MAX_OLD_SPACE_SIZE:-64}"
 WA_NODE_MAX_OLD_SPACE_SIZE="${WA_NODE_MAX_OLD_SPACE_SIZE:-128}"
+# Limit the YouTube JavaScript solver heap as well as the Node helpers.
+# This is a V8 heap limit, not a limit on total process RSS.
+export DENO_V8_FLAGS="${DENO_V8_FLAGS:---max-old-space-size=96}"
 
 if [ -f "$BGUTIL_MAIN" ]; then
     node --max-old-space-size="$BGUTIL_NODE_MAX_OLD_SPACE_SIZE" "$BGUTIL_MAIN" --port 4416 >/tmp/bgutil.log 2>&1 &
