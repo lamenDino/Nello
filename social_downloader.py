@@ -29,6 +29,7 @@ import json
 import re
 import html
 from media_resources import limited_media
+from youtube_job import run_youtube_job, YouTubeResourceError
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -452,6 +453,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         @limited_media
         def _extract():
+            if self.detect_platform(url) == 'youtube':
+                return run_youtube_job(opts, url)['info']
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)
 
@@ -798,6 +801,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
             @limited_media
             def _download():
+                if self.detect_platform(url) == 'youtube':
+                    return run_youtube_job(opts, url, download=True, info=info)['filename']
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     # Reuse the metadata already fetched and duration-checked.
                     # Avoid two additional player/JS challenge extractions.
@@ -820,6 +825,8 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
             return None
 
+        except YouTubeResourceError:
+            raise
         except Exception as e:
             logger.error(f"Download attempt {attempt}: {str(e)[:200]}")
             return None
@@ -1003,6 +1010,9 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
                     'url': clean_url
                 }
 
+            except YouTubeResourceError as e:
+                logger.warning('YouTube resource guard: %s', e)
+                return {'success': False, 'error': str(e)}
             except Exception as e:
                 err = str(e).lower()
                 logger.error(f"Tentativo {attempt + 1} fallito: {str(e)[:200]}")
@@ -1141,6 +1151,11 @@ class SocialMediaDownloader(TikTokMixin, InstagramMixin, FacebookMixin, CobaltMi
 
         @limited_media
         def _dl():
+            if self.detect_platform(clean_url) == 'youtube':
+                result = run_youtube_job(opts, clean_url, download=True)
+                data = result['info']
+                return (os.path.splitext(result['filename'])[0] + '.mp3',
+                        data.get('title') or 'audio', data.get('uploader') or data.get('channel'))
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(clean_url, download=True)
                 base = ydl.prepare_filename(info)

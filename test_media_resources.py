@@ -82,7 +82,7 @@ class DownloaderTests(unittest.IsolatedAsyncioTestCase):
                 ydl = factory.return_value.__enter__.return_value
                 ydl.prepare_filename.return_value = str(path)
                 info = {'id': 'example', 'duration': 72}
-                self.assertEqual(await dl.download_with_ytdlp('https://youtu.be/example', info=info), str(path))
+                self.assertEqual(await dl.download_with_ytdlp('https://facebook.com/reel/123', info=info), str(path))
                 ydl.process_ie_result.assert_called_once_with(info, download=True)
                 ydl.extract_info.assert_not_called()
                 ydl.download.assert_not_called()
