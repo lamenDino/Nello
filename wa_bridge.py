@@ -26,6 +26,7 @@ import requests
 from aiohttp import web
 
 import core
+from wa_media import prepare_video
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,27 @@ def build_app(ns):
                               'size': os.path.getsize(p)})
         if not files:
             return web.json_response({'success': False, 'error': 'nessun file'})
+
+        # Normalize every video, including Facebook and carousel fallbacks.
+        # Run outside the bridge event loop so auth/ping/react remain available.
+        try:
+            for f in files:
+                if f['video']:
+                    source = f['path']
+                    f['path'] = await asyncio.to_thread(prepare_video, source)
+                    f['size'] = os.path.getsize(f['path'])
+                    os.remove(source)
+        except Exception as e:
+            logger.warning('WA video preparation failed: %s', type(e).__name__)
+            for f in files:
+                try:
+                    os.remove(f['path'])
+                except OSError:
+                    pass
+            return web.json_response({
+                'success': False,
+                'error': 'Video non convertibile per WhatsApp. Riprova con il link originale.',
+            })
 
         has_video = any(f['video'] for f in files)
         has_photo = any(not f['video'] for f in files)

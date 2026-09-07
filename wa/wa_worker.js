@@ -197,7 +197,7 @@ async function handleMessages(sock, upsert) {
             const f = files[0];
             try {
               const sent = await sock.sendMessage(
-                jid, f.video ? { video: { url: f.path }, caption: info.caption }
+                jid, f.video ? { video: { url: f.path }, mimetype: 'video/mp4', caption: info.caption }
                              : { image: { url: f.path }, caption: info.caption });
               if (sent && sent.key) voteKey = `wa:${sent.key.id}`;
             } catch (e) { console.log('WA: invio media fallito:', e.message); }
@@ -208,7 +208,7 @@ async function handleMessages(sock, upsert) {
             let firstSent = null;
             for (const f of files) {
               try {
-                const sent = await sock.sendMessage(jid, f.video ? { video: { url: f.path } } : { image: { url: f.path } });
+                const sent = await sock.sendMessage(jid, f.video ? { video: { url: f.path }, mimetype: 'video/mp4' } : { image: { url: f.path } });
                 if (!firstSent && sent) firstSent = sent;
               } catch (e) { /* salta questo file */ }
             }
