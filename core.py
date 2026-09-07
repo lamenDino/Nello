@@ -11,14 +11,13 @@ parti che li distinguono (mittente già renderizzato, icone, se mostrare l'invit
 """
 
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, unquote_plus
 from html import escape as _html_escape
 
 VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
 
 # --- Link "scarica audio" servito dal web server del bot su /a/<token> ---
-# Così l'audio è un semplice link accorciato che funziona su Telegram, Discord e
-# WhatsApp (niente più bottone inline, che i caroselli non supportavano).
+# I link audio vengono mostrati solo nelle didascalie Telegram.
 AUDIO_BASE = (os.getenv('PUBLIC_URL') or os.getenv('RENDER_EXTERNAL_URL')
               or 'https://nello-9amr.onrender.com').rstrip('/')
 _LINK_BASE = f"{AUDIO_BASE}/l"
@@ -116,12 +115,22 @@ SPOILER_MIN_LEN = 120
 
 
 def short_url(url: str) -> str:
-    """URL corto da mostrare nella card.
-    - Telegram: usa sempre il testo 'apri originale' (gestito fuori da qui).
-    - Discord / WhatsApp: usa SEMPRE il redirect interno /l/<token> in stile bitly,
-      così la card non mostra mai URL lunghi o parametri di tracking.
+    """Mantiene il link originale, eliminando solo tracking noto.
+
+    Conserva identificativi, timestamp e parametri sconosciuti, senza redirect
+    interni e senza modificare la codifica dei parametri rimasti.
     """
-    return short_link_for(url) or url
+    try:
+        parts = urlsplit(url)
+        tracking = {'fbclid', 'igsh', 'igshid'}
+        query = '&'.join(
+            item for item in parts.query.split('&')
+            if (key := unquote_plus(item.partition('=')[0]).lower()) not in tracking
+            and not key.startswith('utm_')
+        )
+        return urlunsplit(parts._replace(query=query))
+    except ValueError:
+        return url
 
 
 def detect_platform(url: str) -> str:
@@ -253,7 +262,9 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
     # Info: descrizione lunga COMPATTA (tap per espandere) su Telegram (blockquote
     # espandibile) e Discord (spoiler); WhatsApp non ha collapse -> anteprima corta.
     collapse = cfg.get('collapse')
-    if len(clean) > SPOILER_MIN_LEN:
+    if label == 'Video':
+        pass  # Per i video bastano sito, mittente e link originale.
+    elif len(clean) > SPOILER_MIN_LEN:
         if collapse:
             lines.append(f"{icons['meta']} {cfg['b']('Info:')}\n{collapse(cfg['esc'](clean))}")
         else:
@@ -264,17 +275,14 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
 
     # Link "scarica audio": per i video e le slideshow TikTok (che hanno la musica).
     show_audio = (label == 'Video') or (label in ('Foto', 'Contenuto') and detect_platform(url) == 'TikTok')
-    if show_audio:
+    if dialect == 'html' and show_audio:
         au = audio_link_for(url)
         pl = play_link_for(url)
         if au and pl:
-            if dialect == 'html':
-                lines.append(
-                    f'🎵 <a href="{_html_escape(pl)}">▶️ ascolta</a> · '
-                    f'<a href="{_html_escape(au)}">⬇️ audio</a>'
-                )
-            else:
-                lines.append(f"🎵 ▶️ ascolta: {cfg['wrap'](pl)} · ⬇️ audio: {cfg['wrap'](au)}")
+            lines.append(
+                f'🎵 <a href="{_html_escape(pl)}">▶️ ascolta</a> · '
+                f'<a href="{_html_escape(au)}">⬇️ audio</a>'
+            )
 
     # Niente riga 📊 (durata/views/like/autore) e niente invito: card pulita.
     return "\n".join(lines)
