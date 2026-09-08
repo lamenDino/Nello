@@ -228,7 +228,7 @@ async function handleMessages(sock, upsert) {
             const res = await bridge('/sent', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ url, user_id: ownerId, user_name: ownerName, key: voteKey }),
+              body: JSON.stringify({ url, user_id: ownerId, user_name: ownerName, key: voteKey, jid }),
             });
             if (res && Array.isArray(res.achievements)) {
               for (const a of res.achievements) {
@@ -271,6 +271,44 @@ async function start() {
     markOnlineOnConnect: false,
   });
 
+  let rankingTimer = null;
+  let rankingBusy = false;
+  let connected = false;
+  const rankingSent = new Set();
+  let groupIds = [];
+  let groupsUpdated = 0;
+  const pollRankings = async () => {
+    if (!connected || rankingBusy) return;
+    rankingBusy = true;
+    try {
+      if (Date.now() - groupsUpdated > 15 * 60 * 1000) {
+        groupIds = Object.keys(await sock.groupFetchAllParticipating());
+        groupsUpdated = Date.now();
+      }
+      const result = await bridge('/weekly-rankings', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ groups: groupIds }),
+      });
+      for (const message of result.messages || []) {
+        if (!connected) break;
+        try {
+          if (!rankingSent.has(message.id)) {
+            await sock.sendMessage(message.jid, { text: message.text }, { messageId: message.id });
+            rankingSent.add(message.id);
+          }
+          const ack = await bridge('/ranking-ack', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ jid: message.jid, id: message.id }),
+          });
+          if (!ack.ok) throw new Error('ranking acknowledgement failed');
+        } catch (e) { console.log('WA: classifica non confermata, riprovo:', e.message); }
+      }
+    } catch (e) { console.log('WA: controllo classifica fallito:', e.message); }
+    finally { rankingBusy = false; }
+  };
+  sock.ev.on('groups.update', () => { groupsUpdated = 0; });
+  sock.ev.on('groups.upsert', () => { groupsUpdated = 0; });
+
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (u) => {
@@ -283,8 +321,15 @@ async function start() {
       console.log('============================================\n');
     }
     if (connection === 'open') {
+      connected = true;
+      if (rankingTimer) clearInterval(rankingTimer);
+      rankingTimer = setInterval(pollRankings, 60000);
+      pollRankings();
       console.log('WA: connesso a WhatsApp ✅');
     } else if (connection === 'close') {
+      connected = false;
+      if (rankingTimer) clearInterval(rankingTimer);
+      rankingTimer = null;
       const code = lastDisconnect && lastDisconnect.error
         && lastDisconnect.error.output && lastDisconnect.error.output.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;

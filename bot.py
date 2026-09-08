@@ -1490,7 +1490,7 @@ async def weekly_ranking(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Video della settimana non inviato: {e}")
 
-    await ranking_store.reset_weekly()
+    await ranking_store.reset_weekly(platform='tg')
 
 
 async def monthly_oscar(context: ContextTypes.DEFAULT_TYPE):
@@ -1813,6 +1813,7 @@ def main():
     from types import SimpleNamespace
     ns = SimpleNamespace(
         ranking_store=ranking_store,
+        aforismi=AFORISMI,
         is_supported_link=is_supported_link,
         detect_platform=detect_platform,
         clean_title=_clean_title,

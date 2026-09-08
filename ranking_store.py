@@ -78,7 +78,7 @@ class RankingStore:
     async def get_user_stats(self, user_id: int) -> Dict:
         raise NotImplementedError
 
-    async def reset_weekly(self) -> None:
+    async def reset_weekly(self, platform=None) -> None:
         raise NotImplementedError
 
     async def get_earned(self, user_id: int) -> set:
@@ -485,7 +485,7 @@ class JsonRankingStore(RankingStore):
         return _user_stats(_scope(self.data, platform), user_id)
 
     async def reset_weekly(self, platform=None):
-        for sub in _all_scopes(self.data):
+        for sub in ([_scope(self.data, platform)] if platform is not None else _all_scopes(self.data)):
             sub['weekly'] = {}
             sub['vote_week'] = {}
         await asyncio.to_thread(self._save)
@@ -594,6 +594,15 @@ class JsonRankingStore(RankingStore):
     async def monthly_active_users(self, platform='tg'):
         return [int(k) for k in (_scope(self.data, platform).get('monthly', {}) or {}).keys()]
 
+    async def wa_group_ranking(self, jid, period, quote='', point=None, ack=None):
+        from wa_ranking import update_group
+        group = self.data.setdefault('wa_groups', {}).setdefault(jid, {})
+        before = json.dumps(group, sort_keys=True)
+        result = update_group(group, jid, period, quote, point, ack)
+        if json.dumps(group, sort_keys=True) != before:
+            await asyncio.to_thread(self._save)
+        return result
+
     async def get_wa_auth(self):
         return self.data.get('wa_auth')
 
@@ -615,6 +624,8 @@ class JsonRankingStore(RankingStore):
 
 class FirestoreRankingStore(RankingStore):
     def __init__(self, client):
+        self._client = client
+        self._wa_groups = client.collection('wa_group_rankings')
         self._doc = client.collection('bot_state').document('rankings_v2')
         self._recent = client.collection('bot_state').document('recent_links')
         self._cache = client.collection('bot_state').document('file_cache')
@@ -645,7 +656,7 @@ class FirestoreRankingStore(RankingStore):
     async def reset_weekly(self, platform=None):
         def _op():
             data = self._read()
-            for sub in _all_scopes(data):
+            for sub in ([_scope(data, platform)] if platform is not None else _all_scopes(data)):
                 sub['weekly'] = {}
                 sub['vote_week'] = {}
             self._doc.set(data)
@@ -752,6 +763,23 @@ class FirestoreRankingStore(RankingStore):
     async def monthly_active_users(self, platform='tg'):
         data = await asyncio.to_thread(self._read)
         return [int(k) for k in (_scope(data, platform).get('monthly', {}) or {}).keys()]
+
+    async def wa_group_ranking(self, jid, period, quote='', point=None, ack=None):
+        from google.cloud import firestore
+        from wa_ranking import update_group
+        ref = self._wa_groups.document(jid)
+        def operation():
+            @firestore.transactional
+            def apply(transaction):
+                snapshot = ref.get(transaction=transaction)
+                data = snapshot.to_dict() or {}
+                before = json.dumps(data, sort_keys=True)
+                result = update_group(data, jid, period, quote, point, ack)
+                if json.dumps(data, sort_keys=True) != before:
+                    transaction.set(ref, data)
+                return result
+            return apply(self._client.transaction())
+        return await asyncio.to_thread(operation)
 
     async def get_wa_auth(self):
         def _op():

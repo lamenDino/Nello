@@ -21,6 +21,9 @@ import time
 import asyncio
 import logging
 import threading
+import random
+import re
+from wa_ranking import current_period
 
 import requests
 from aiohttp import web
@@ -51,6 +54,10 @@ def build_app(ns):
         'best[ext=mp4][vcodec~="^(avc1|h264)"][acodec!=none]/'
         + dl.base_opts['format'])
     rs = ns.ranking_store
+    group_lock = asyncio.Lock()
+
+    def quote():
+        return random.choice(getattr(ns, 'aforismi', None) or ['Condividere rende tutto piu bello.'])
 
     async def download(request):
         try:
@@ -140,6 +147,13 @@ def build_app(ns):
         except (TypeError, ValueError):
             return web.json_response(out)
         name = b.get('user_name') or 'Utente'
+        jid = b.get('jid', '')
+        if b.get('key') and re.fullmatch(r'[0-9-]+@g\.us', jid):
+            try:
+                async with group_lock:
+                    await rs.wa_group_ranking(jid, current_period(), quote(), point=(uid, name))
+            except Exception:
+                logger.exception('WA group point failed')
         key = b.get('key')
         try:
             totals = await rs.add_point(uid, name, platform='wa')
@@ -235,12 +249,35 @@ def build_app(ns):
         await asyncio.to_thread(_send)
         return web.json_response({'ok': True})
 
+    async def weekly_rankings(request):
+        body = await request.json()
+        groups = body.get('groups', [])
+        if (not isinstance(groups, list) or len(groups) > 500 or
+                any(not isinstance(jid, str) or not re.fullmatch(r'[0-9-]+@g\.us', jid) for jid in groups)):
+            raise web.HTTPBadRequest()
+        messages = []
+        async with group_lock:
+            for jid in dict.fromkeys(groups):
+                messages.extend(await rs.wa_group_ranking(jid, current_period(), quote()))
+        return web.json_response({'messages': messages})
+
+    async def ranking_ack(request):
+        body = await request.json()
+        jid, ident = body.get('jid', ''), body.get('id', '')
+        if not re.fullmatch(r'[0-9-]+@g\.us', jid) or not re.fullmatch(r'[A-F0-9]{24}', ident):
+            raise web.HTTPBadRequest()
+        async with group_lock:
+            await rs.wa_group_ranking(jid, current_period(), quote(), ack=ident)
+        return web.json_response({'ok': True})
+
     async def ping(request):
         return web.Response(text="OK")
 
     app = web.Application(client_max_size=8 * 1024 * 1024)
     app.add_routes([
         web.get('/ping', ping),
+        web.post('/weekly-rankings', weekly_rankings),
+        web.post('/ranking-ack', ranking_ack),
         web.post('/notify', notify),
         web.post('/download', download),
         web.post('/sent', sent),
