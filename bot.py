@@ -61,17 +61,9 @@ async def effective_admin_id():
         pass
     return ADMIN_USER_ID
 
-# Credenziali Render (opzionali): abilitano /setcookies persistente e l'auto-redeploy
+# Credenziali Render del bot (opzionali): comandi di deploy amministrativi
 RENDER_API_KEY = os.getenv('RENDER_API_KEY')
 RENDER_SERVICE_ID = os.getenv('RENDER_SERVICE_ID')
-
-# Mappa piattaforma -> (attributo cookie del downloader, nome secret file su Render)
-COOKIE_TARGETS = {
-    'youtube': ('youtube_cookies', 'YOUTUBE_COOKIES'),
-    'instagram': ('instagram_cookies', 'INSTAGRAM_COOKIES'),
-    'tiktok': ('tiktok_cookies', 'TIKTOK_COOKIES'),
-    'facebook': ('facebook_cookies', 'FACEBOOK_COOKIES'),
-}
 
 # Limite di upload della Bot API di Telegram (50MB per i bot standard)
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024
@@ -804,16 +796,6 @@ def _render_request(method: str, path: str, body: dict = None):
     return requests.request(method, url, headers=headers, json=body, timeout=20)
 
 
-def render_update_secret(secret_name: str, content: str) -> bool:
-    try:
-        r = _render_request("PUT", f"/services/{RENDER_SERVICE_ID}/secret-files/{secret_name}",
-                            {"content": content})
-        return r.status_code in (200, 201)
-    except Exception as e:
-        logger.warning(f"Render secret update fallito: {e}")
-        return False
-
-
 def render_trigger_deploy() -> bool:
     try:
         r = _render_request("POST", f"/services/{RENDER_SERVICE_ID}/deploys", {})
@@ -821,84 +803,6 @@ def render_trigger_deploy() -> bool:
     except Exception as e:
         logger.warning(f"Render deploy trigger fallito: {e}")
         return False
-
-
-def _valid_netscape(content: str) -> bool:
-    for line in content.splitlines():
-        line = line.strip()
-        if line and not line.startswith('#') and len(line.split('\t')) >= 7:
-            return True
-    return False
-
-
-# Stato: admin -> piattaforma in attesa del file cookie
-_pending_cookies = {}
-
-
-async def setcookies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: aggiorna i cookie di una piattaforma inviando il file in DM."""
-    u = update.effective_user
-    if u.id != ADMIN_USER_ID:
-        await update.message.reply_text("🔒 Solo l'admin può usare questo comando.")
-        return
-    args = context.args or []
-    plat = args[0].lower() if args else ''
-    if plat not in COOKIE_TARGETS:
-        await update.message.reply_text(
-            "Uso: /setcookies <piattaforma>\n"
-            "Piattaforme: youtube, instagram, tiktok, facebook\n"
-            "Poi mandami QUI in privato il file .txt dei cookie."
-        )
-        return
-    _pending_cookies[u.id] = plat
-    await update.message.reply_text(
-        f"📥 Ok, ora mandami il file <b>.txt</b> dei cookie per <b>{plat}</b> (formato Netscape).",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Riceve il file cookie dall'admin dopo /setcookies."""
-    u = update.effective_user
-    if not u or u.id != ADMIN_USER_ID or u.id not in _pending_cookies:
-        return
-    plat = _pending_cookies.pop(u.id)
-    attr, secret_name = COOKIE_TARGETS[plat]
-    try:
-        doc = update.message.document
-        f = await context.bot.get_file(doc.file_id)
-        content = (await f.download_as_bytearray()).decode('utf-8', 'replace')
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Non riesco a leggere il file: {e}")
-        return
-
-    if not _valid_netscape(content):
-        await update.message.reply_text("⚠️ Non sembra un file cookie Netscape valido (righe con 7 campi separati da TAB).")
-        return
-
-    # 1) Effetto immediato: sovrascrive il file cookie usato dal downloader
-    immediate = False
-    try:
-        path = getattr(get_downloader(), attr, None)
-        if path:
-            with open(path, 'w', encoding='utf-8', newline='\n') as fh:
-                fh.write(content)
-            immediate = True
-    except Exception as e:
-        logger.warning(f"Scrittura cookie live fallita: {e}")
-
-    # 2) Persistenza: aggiorna il secret file su Render (se configurato)
-    persisted = False
-    if RENDER_API_KEY and RENDER_SERVICE_ID:
-        persisted = await asyncio.to_thread(render_update_secret, secret_name, content)
-
-    msg = f"✅ Cookie <b>{plat}</b> aggiornati."
-    msg += "\n• Effetto immediato: " + ("sì 🎯" if immediate else "no")
-    if RENDER_API_KEY and RENDER_SERVICE_ID:
-        msg += "\n• Salvati su Render (persistenti): " + ("sì 💾" if persisted else "no ⚠️")
-    else:
-        msg += "\n• Persistenza su Render: non configurata (imposta RENDER_API_KEY e RENDER_SERVICE_ID per renderli permanenti)."
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 async def chats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1796,13 +1700,18 @@ def main():
     application.add_handler(CommandHandler("profilo", profilo_cmd))
     application.add_handler(CommandHandler("votati", votati_cmd))
     application.add_handler(CommandHandler("admin", admin_cmd))
-    application.add_handler(CommandHandler("setcookies", setcookies_cmd))
+    from cookie_admin import CookieAdmin
+    cookie_admin = CookieAdmin(effective_admin_id, ranking_store)
+    application.add_handler(CommandHandler("cookies", cookie_admin.command))
+    application.add_handler(CommandHandler("setcookies", cookie_admin.command))
+    application.add_handler(CallbackQueryHandler(cookie_admin.callback, pattern=r"^cookies:"))
+    application.job_queue.run_repeating(cookie_admin.check, interval=300, first=60, name="cookie-admin-monitor")
     application.add_handler(CommandHandler("chats", chats_cmd))
     application.add_handler(CommandHandler("sfida", sfida_cmd))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageReactionHandler(on_reaction))
     # File inviato dall'admin per /setcookies
-    application.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    application.add_handler(MessageHandler(filters.Document.ALL, cookie_admin.document))
     # Log all text messages first to verify visibility
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_handler))
     application.add_error_handler(error_handler)

@@ -613,6 +613,13 @@ class JsonRankingStore(RankingStore):
     async def get_admin_chat(self):
         return self.data.get('admin_chat')
 
+    async def get_cookie_alerts(self):
+        return self.data.get('cookie_alerts', {})
+
+    async def set_cookie_alerts(self, alerts):
+        self.data['cookie_alerts'] = alerts
+        await asyncio.to_thread(self._save)
+
     async def set_admin_chat(self, chat_id):
         self.data['admin_chat'] = int(chat_id)
         await asyncio.to_thread(self._save)
@@ -795,6 +802,15 @@ class FirestoreRankingStore(RankingStore):
     async def get_admin_chat(self):
         data = await asyncio.to_thread(self._read)
         return data.get('admin_chat')
+
+    async def get_cookie_alerts(self):
+        def read():
+            snap = self._client.collection('bot_state').document('cookie_alerts').get()
+            return snap.to_dict() or {}
+        return await asyncio.to_thread(read)
+
+    async def set_cookie_alerts(self, alerts):
+        await asyncio.to_thread(self._client.collection('bot_state').document('cookie_alerts').set, alerts)
 
     async def set_admin_chat(self, chat_id):
         def _op():
