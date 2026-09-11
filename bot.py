@@ -1702,6 +1702,7 @@ def main():
     application.add_handler(CommandHandler("admin", admin_cmd))
     from cookie_admin import CookieAdmin
     cookie_admin = CookieAdmin(effective_admin_id, ranking_store)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cookie_admin.capture_text), group=-1)
     application.add_handler(CommandHandler("cookies", cookie_admin.command))
     application.add_handler(CommandHandler("setcookies", cookie_admin.command))
     application.add_handler(CallbackQueryHandler(cookie_admin.callback, pattern=r"^cookies:"))

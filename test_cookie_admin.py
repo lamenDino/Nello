@@ -4,6 +4,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 from cookie_admin import CookieAdmin
+from telegram.ext import ApplicationHandlerStop
 
 
 def update(user=42, chat=42, kind='private'):
@@ -73,6 +74,44 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         self.admin.admin_id.return_value = -123
         await self.admin.check(self.context)
         self.admin.api.assert_not_awaited()
+
+    async def test_paste_multiple_messages_saved_only_by_admin_button(self):
+        u = update()
+        await self.admin.select(u, 'instagram')
+        for text in ('# Netscape HTTP Cookie File', '.instagram.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\tSECRET'):
+            u.effective_message.text = text
+            with self.assertRaises(ApplicationHandlerStop):
+                await self.admin.capture_text(u, self.context)
+        self.admin.api.assert_not_awaited()
+        self.assertEqual(u.effective_message.delete.await_count, 2)
+        u.callback_query.data = 'cookies:save'
+        await self.admin.callback(u, self.context)
+        self.admin.api.assert_awaited_once_with('PUT', 'instagram', '# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\tSECRET')
+        self.assertNotIn(42, self.admin.pasted)
+        for call in u.effective_message.reply_text.call_args_list:
+            self.assertNotIn('SECRET', call.args[0])
+
+    async def test_pasted_text_without_selection_or_wrong_chat_is_untouched(self):
+        u = update()
+        u.effective_message.text = 'normal text'
+        await self.admin.capture_text(u, self.context)
+        self.admin.pending[42] = ('instagram', time.monotonic() + 60)
+        for u in (update(user=7), update(chat=-42, kind='group')):
+            await self.admin.capture_text(u, self.context)
+            u.effective_message.delete.assert_not_awaited()
+        self.assertEqual(self.admin.pasted, {})
+
+    async def test_cancel_and_timeout_clear_pasted_content(self):
+        u = update()
+        self.admin.pending[42] = ('instagram', time.monotonic() + 60)
+        self.admin.pasted[42] = ['SECRET']
+        u.callback_query.data = 'cookies:cancel'
+        await self.admin.callback(u, self.context)
+        self.assertEqual(self.admin.pasted, {})
+        self.admin.pending[42] = ('instagram', 0)
+        self.admin.pasted[42] = ['SECRET']
+        await self.admin.check(self.context)
+        self.assertEqual(self.admin.pasted, {})
 
     async def test_restriction_alert_has_browser_button_and_takes_priority(self):
         self.admin.api.return_value = {'platforms': {'instagram': {

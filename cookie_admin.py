@@ -37,6 +37,7 @@ class CookieAdmin:
         self.admin_id = admin_id
         self.store = store
         self.pending = {}
+        self.pasted = {}
         self.alerts = {}
         self.loaded = False
 
@@ -80,9 +81,11 @@ class CookieAdmin:
 
     async def select(self, update, platform):
         self.pending[update.effective_user.id] = (platform, time.monotonic() + 1200)
+        self.pasted.pop(update.effective_user.id, None)
         await update.effective_message.reply_text(
             'Aggiornamento ' + LABELS[platform] + '\nAccedi al sito dal browser, poi esporta soltanto '
-            'i cookie di questa piattaforma in formato Netscape (.txt). Invia il file qui in privato entro 20 minuti. '
+            'i cookie di questa piattaforma in formato Netscape. Incolla qui il contenuto, anche in più messaggi, '
+            'poi premi Salva cookie. Oppure invia il file .txt. Hai 20 minuti. '
             'Il file sarà salvato sul downloader, anche per i prossimi riavvii.',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Annulla', callback_data='cookies:cancel')]]))
 
@@ -106,9 +109,58 @@ class CookieAdmin:
             await self.select(update, action)
         elif action == 'cancel':
             self.pending.pop(update.effective_user.id, None)
+            self.pasted.pop(update.effective_user.id, None)
             await update.effective_message.reply_text('Aggiornamento annullato.', reply_markup=keyboard())
+        elif action == 'save':
+            ident = update.effective_user.id
+            pending = self.pending.get(ident)
+            if not pending or time.monotonic() > pending[1]:
+                self.pending.pop(ident, None)
+                self.pasted.pop(ident, None)
+                await update.effective_message.reply_text('Seleziona nuovamente la piattaforma.', reply_markup=keyboard())
+            elif not self.pasted.get(ident):
+                await update.effective_message.reply_text('Incolla prima il contenuto dei cookie.')
+            else:
+                await self.save_content(update, context, pending[0], '\n'.join(self.pasted[ident]))
         elif action == 'status':
             await self.show_status(update.effective_message)
+
+    async def capture_text(self, update, context):
+        """Consume private cookie messages before the download/logging handler."""
+        if (not update.effective_user or update.effective_user.id not in self.pending
+                or not update.effective_chat or update.effective_chat.type != 'private'):
+            return
+        if not await self.allowed(update):
+            return
+        ident = update.effective_user.id
+        pending = self.pending.get(ident)
+        if not pending:
+            return
+        from telegram.ext import ApplicationHandlerStop
+        message = update.effective_message
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        if time.monotonic() > pending[1]:
+            self.pending.pop(ident, None)
+            self.pasted.pop(ident, None)
+            await message.reply_text('Richiesta scaduta. Seleziona nuovamente la piattaforma.', reply_markup=keyboard())
+            raise ApplicationHandlerStop
+        content = (message.text or '').strip()
+        if content.startswith('```') and content.endswith('```'):
+            content = '\n'.join(content.splitlines()[1:-1])
+        parts = self.pasted.setdefault(ident, [])
+        if sum(len(part.encode('utf-8')) + 1 for part in parts) + len(content.encode('utf-8')) > MAX_BYTES:
+            await message.reply_text('Limite di 512 KB superato. Annulla e riprova esportando solo la piattaforma selezionata.')
+            raise ApplicationHandlerStop
+        parts.append(content)
+        await message.reply_text(
+            'Contenuto ricevuto. Puoi incollare altre parti; quando hai finito premi Salva cookie.',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('Salva cookie', callback_data='cookies:save')],
+                [InlineKeyboardButton('Annulla', callback_data='cookies:cancel')]]))
+        raise ApplicationHandlerStop
 
     async def document(self, update, context):
         if not await self.allowed(update):
@@ -121,6 +173,7 @@ class CookieAdmin:
         message = update.effective_message
         if time.monotonic() > expires:
             self.pending.pop(ident, None)
+            self.pasted.pop(ident, None)
             await message.reply_text('Richiesta scaduta. Seleziona nuovamente la piattaforma.', reply_markup=keyboard())
             return
         doc = message.document
@@ -140,16 +193,23 @@ class CookieAdmin:
             await message.delete()
         except Exception:
             pass
+        await self.save_content(update, context, platform, content)
+
+    async def save_content(self, update, context, platform, content):
+        ident = update.effective_user.id
+        message = update.effective_message
         try:
             await self.api('PUT', platform, content)
         except RuntimeError as exc:
-            await message.reply_text(str(exc) + '\nPuoi reinviare il file senza riselezionare la piattaforma.')
+            self.pasted.pop(ident, None)
+            await message.reply_text(str(exc) + '\nIncolla nuovamente il contenuto completo oppure reinvia il file.')
             return
         except Exception:
             log.warning('Cookie upload unavailable: platform=%s', platform)
             await message.reply_text('Aggiornamento non confermato. Riprova tra un minuto reinviando il file.')
             return
         self.pending.pop(ident, None)
+        self.pasted.pop(ident, None)
         self.alerts.pop(platform, None)
         if self.store:
             try:
@@ -162,6 +222,10 @@ class CookieAdmin:
                                        reply_markup=keyboard())
 
     async def check(self, context):
+        for ident, (_, expires) in list(self.pending.items()):
+            if time.monotonic() > expires:
+                self.pending.pop(ident, None)
+                self.pasted.pop(ident, None)
         admin = await self.admin_id()
         if admin <= 0:
             return  # Never fall back to a group ID.
