@@ -74,6 +74,16 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         await self.admin.check(self.context)
         self.admin.api.assert_not_awaited()
 
+    async def test_restriction_alert_has_browser_button_and_takes_priority(self):
+        self.admin.api.return_value = {'platforms': {'instagram': {
+            'state': 'expired', 'version': 'v1', 'issue': 'account_restricted'}}}
+        await self.admin.check(self.context)
+        call = self.context.bot.send_message.call_args
+        self.assertIn('account limitato', call.args[1])
+        self.assertNotIn('sessione scaduti', call.args[1])
+        buttons = call.kwargs['reply_markup'].inline_keyboard
+        self.assertEqual(buttons[1][0].url, 'https://www.instagram.com/')
+
     async def test_expired_selection_and_large_file_are_not_downloaded(self):
         u = update()
         self.admin.pending[42] = ('instagram', 0)

@@ -13,15 +13,23 @@ STATES = {'present': 'cookie presenti (accesso non verificato)', 'missing': 'coo
           'expired': 'cookie di sessione scaduti', 'invalid': 'file non valido',
           'missing_session': 'cookie di accesso mancanti'}
 ISSUES = {'session_rejected': 'sessione rifiutata: verifica il login e rinnova i cookie',
+          'account_restricted': 'account limitato o bloccato dal social: apri il sito dal browser e completa la verifica o la richiesta di controllo',
+          'rate_limited': 'il social limita le richieste: attendi prima di riprovare; non significa necessariamente che i cookie siano scaduti',
+          'access_denied': 'il social rifiuta l’accesso dal server: verifica account e sessione dal browser; il motivo non è confermato',
           'login_required': 'accesso richiesto: cookie o limitazione del sito da verificare',
           'access_check': 'controllo anti-bot o verifica account: cookie non necessariamente scaduti'}
+
+
+SOCIAL_URLS = {'instagram': 'https://www.instagram.com/', 'facebook': 'https://www.facebook.com/',
+               'youtube': 'https://www.youtube.com/', 'tiktok': 'https://www.tiktok.com/'}
 
 
 def keyboard(platform=None):
     platforms = [platform] if platform else list(LABELS)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('Aggiorna ' + LABELS[p], callback_data='cookies:' + p)] for p in platforms
-    ] + [[InlineKeyboardButton('Stato cookie', callback_data='cookies:status')]])
+    ] + ([[InlineKeyboardButton('Apri ' + LABELS[platform], url=SOCIAL_URLS[platform])]] if platform else [])
+      + [[InlineKeyboardButton('Stato cookie', callback_data='cookies:status')]])
 
 
 class CookieAdmin:
@@ -168,7 +176,7 @@ class CookieAdmin:
                     continue
                 issue = item.get('issue')
                 state = item.get('state')
-                reason = STATES.get(state) if state in ('expired', 'invalid') else ISSUES.get(issue)
+                reason = ISSUES.get(issue) or (STATES.get(state) if state in ('expired', 'invalid') else None)
                 if not reason:
                     self.alerts.pop(platform, None)
                     continue
