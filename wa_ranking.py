@@ -13,16 +13,16 @@ def current_period(now=None):
 
 
 def render_board(board, quote):
-    lines = ['?? *RANKING SETTIMANALE* ??', '']
-    for index, badge in enumerate(('??', '??', '??')):
+    lines = ['\U0001f973 *RANKING SETTIMANALE* \U0001f973', '']
+    for index, badge in enumerate(('\U0001f947', '\U0001f948', '\U0001f949')):
         if index < len(board):
             _, count, name = board[index]
             name = str(name).replace('\n', ' ').replace('*', '').replace('_', '')
-            lines.append(f'{badge} {name} ? *{count}* video')
+            lines.append(f'{badge} {name} \u2014 *{count}* video')
         else:
-            lines.append(f'{badge} ? *0* video')
+            lines.append(f'{badge} \u2014 *0* video')
     if quote:
-        lines.extend(['', '?? _' + quote.replace('_', '') + '_'])
+        lines.extend(['', '\U0001f4dc _' + quote.replace('_', '') + '_'])
     return '\n'.join(lines)
 
 
