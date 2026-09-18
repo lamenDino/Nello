@@ -212,14 +212,16 @@ def _fid_from_msg(m):
     return None
 
 
-def build_cache_payload(captured: list, platform: str, title: str, video_processing_version=0) -> dict:
+def build_cache_payload(captured: list, platform: str, title: str, video_processing_version=0,
+                        subtitle_status='unavailable') -> dict:
     """captured = lista di (tipo, file_id). Costruisce il payload da mettere in cache."""
     if not captured:
         return None
     if len(captured) == 1:
         t, fid = captured[0]
         return {'kind': t, 'fid': fid, 'platform': platform, 'title': title, 'description_version': 2,
-                'video_processing_version': video_processing_version}
+                'video_processing_version': video_processing_version,
+                'subtitles': subtitle_status, 'subtitles_checked_at': datetime.now().timestamp()}
     return {'kind': 'carousel', 'platform': platform, 'title': title, 'description_version': 2,
             'items': [{'t': t, 'fid': fid} for t, fid in captured]}
 
@@ -229,6 +231,9 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     photo = cached.get('kind') in ('photo', 'carousel')
     if cached.get('kind') == 'video' and cached.get('video_processing_version') != 2:
         return False  # Reprocess pre-subtitle videos once.
+    if (cached.get('kind') == 'video' and cached.get('subtitles') != 'burned_it'
+            and datetime.now().timestamp() - float(cached.get('subtitles_checked_at') or 0) > 3600):
+        return False  # Do not keep transient translation failures cached forever.
     if photo and cached.get('description_version') != 2:
         return False  # Old entries contain truncated descriptions: fetch again.
     sender = f'<a href="tg://user?id={msg.from_user.id}">{escape(msg.from_user.full_name)}</a>'
@@ -1222,7 +1227,7 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Salva i file_id in cache per il rinvio istantaneo dei prossimi repost
                 try:
                     payload = build_cache_payload(captured, detect_platform(url), raw_title,
-                                                  info.get('video_processing_version', 0))
+                                                  info.get('video_processing_version', 0), info.get('subtitles', 'unavailable'))
                     if payload:
                         await ranking_store.set_cached(key, payload)
                 except Exception as e:
