@@ -219,6 +219,12 @@ async function handleMessages(sock, upsert) {
             if (firstSent && firstSent.key) voteKey = `wa:${firstSent.key.id}`;
             try { await sock.sendMessage(jid, { text: info.caption }); } catch (e) { /* */ }
           }
+          if (voteKey) {
+            for (const text of info.caption_extra || []) {
+              try { await sock.sendMessage(jid, { text }); }
+              catch (e) { keepOriginal = true; console.log('WA: invio descrizione fallito:', e.message); }
+            }
+          }
           // pulizia file (Node e Python condividono il filesystem)
           for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) { /* */ } }
           if (voteKey) didSend = true;

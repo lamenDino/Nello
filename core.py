@@ -242,9 +242,9 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
     inviato = "inviata" if label == "Foto" else "inviato"
 
     rt = raw_title or 'Contenuto'
-    if max_desc and len(rt) > max_desc:
+    if label == 'Video' and max_desc and len(rt) > max_desc:
         rt = rt[:max_desc].rstrip() + '…'
-    clean = clean_title(rt, info.get('uploader') or info.get('channel')) or rt
+    clean = (clean_title(rt, info.get('uploader') or info.get('channel')) or rt) if label == 'Video' else rt
 
     # Link accorciato: su Telegram come testo cliccabile "apri originale" (nasconde
     # l'URL lungo); su Discord/WhatsApp l'URL senza i parametri di tracking.
@@ -268,8 +268,7 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
         if collapse:
             lines.append(f"{icons['meta']} {cfg['b']('Info:')}\n{collapse(cfg['esc'](clean))}")
         else:
-            preview = clean[:140].rstrip()
-            lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](preview)}…")
+            lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}")
     else:
         lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}")
 

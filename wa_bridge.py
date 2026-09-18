@@ -24,6 +24,7 @@ import threading
 import random
 import re
 from wa_ranking import current_period
+from photo_text import photo_description, split_text
 
 import requests
 from aiohttp import web
@@ -115,8 +116,11 @@ def build_app(ns):
         has_video = any(f['video'] for f in files)
         has_photo = any(not f['video'] for f in files)
         label = 'Contenuto' if (has_video and has_photo) else ('Video' if has_video else 'Foto')
-        caption = core.build_caption(info, url, sender_name or '', info.get('title') or 'Contenuto',
-                                     dialect='whatsapp', invite=False, max_desc=1500)
+        title = info.get('title') or 'Contenuto'
+        if has_photo:
+            title = await photo_description(title)
+        caption = core.build_caption(info, url, sender_name or '', title,
+                                     dialect='whatsapp', invite=False)
 
         if any(f.get('document') for f in files):
             caption += '\n📎 Video originale allegato come file.'
@@ -132,8 +136,10 @@ def build_app(ns):
             return web.json_response({'success': False, 'too_big': True, 'caption': caption,
                                       'max_mb': WHATSAPP_MAX_MB})
 
+        parts = split_text(caption, 3500)
         return web.json_response({'success': True, 'type': info.get('type', 'video'),
-                                  'files': files, 'caption': caption, 'label': label})
+                                  'files': files, 'caption': parts[0],
+                                  'caption_extra': parts[1:], 'label': label})
 
     async def sent(request):
         """Punto in classifica + creazione record voto, dopo invio riuscito."""

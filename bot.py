@@ -35,6 +35,7 @@ from telegram.request import HTTPXRequest
 from dotenv import load_dotenv
 from social_downloader import SocialMediaDownloader
 from ranking_store import get_ranking_store
+from photo_text import photo_description, telegram_parts, plain_text, split_text
 
 load_dotenv()
 
@@ -217,19 +218,27 @@ def build_cache_payload(captured: list, platform: str, title: str) -> dict:
         return None
     if len(captured) == 1:
         t, fid = captured[0]
-        return {'kind': t, 'fid': fid, 'platform': platform, 'title': title}
-    return {'kind': 'carousel', 'platform': platform, 'title': title,
+        return {'kind': t, 'fid': fid, 'platform': platform, 'title': title, 'description_version': 2}
+    return {'kind': 'carousel', 'platform': platform, 'title': title, 'description_version': 2,
             'items': [{'t': t, 'fid': fid} for t, fid in captured]}
 
 
 async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     """Rinvia un media gia' caricato usando il file_id (nessun download). True se riuscito."""
+    photo = cached.get('kind') in ('photo', 'carousel')
+    if photo and cached.get('description_version') != 2:
+        return False  # Old entries contain truncated descriptions: fetch again.
     sender = f'<a href="tg://user?id={msg.from_user.id}">{escape(msg.from_user.full_name)}</a>'
     caption = (
         f"♻️ <b>Ripescato dalla cache</b> (già postato)\n"
         f"{random.choice(ICONS_USER)} <b>Rimesso da:</b> {sender}\n"
         f"{random.choice(ICONS_LINK)} <b>Link:</b> {escape(url)}"
     )
+    extra = []
+    if photo:
+        title = await photo_description(cached.get('title') or '')
+        caption += '\n' + escape(title)
+        caption, extra = telegram_parts(caption)
     try:
         kind = cached.get('kind')
         if kind == 'video':
@@ -262,6 +271,8 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
             await context.bot.send_media_group(chat_id=msg.chat_id, media=media)
         else:
             return False
+        for text in extra:
+            await context.bot.send_message(chat_id=msg.chat_id, text=text, parse_mode=None)
         return True
     except Exception as e:
         logger.warning(f"Resend da cache fallito ({url}): {e}")
@@ -1007,11 +1018,11 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # capire il post. La didascalia Telegram è max ~1024 caratteri, quindi lasciamo
             # margine per le altre righe (piattaforma/mittente/link/info).
             raw_title = info.get('title', 'N/A') or 'Contenuto'
-            max_desc = 750 if info.get('type') == 'carousel' else 500
-            if len(raw_title) > max_desc:
-                raw_title = raw_title[:max_desc].rstrip() + "…"
+            if media_label(info) != 'Video':
+                raw_title = await photo_description(raw_title)
 
             caption = build_caption(info, url, msg.from_user.full_name, raw_title, sender_id=msg.from_user.id)
+            caption, description_extra = telegram_parts(caption)
 
             # =========================
             # INVIO CONTENUTI
@@ -1084,8 +1095,9 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         err_str = str(e).lower()
                         if 'caption' in err_str and 'too long' in err_str:
-                             logger.warning("Caption too long for single item, truncating...")
-                             short_caption = carousel_caption[:950] + "..."
+                             logger.warning("Caption rejected; moving complete text after media")
+                             short_caption = ""
+                             description_extra = split_text(plain_text(carousel_caption)) + description_extra
                              try:
                                  with open(photo_path, "rb") as f:
                                     if is_video:
@@ -1162,10 +1174,11 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                # Handle "caption too long" specifically
                                err_str = str(e).lower()
                                if 'caption' in err_str and 'too long' in err_str:
-                                   logger.warning("Caption too long, truncating and retrying...")
+                                   logger.warning("Caption rejected; moving complete text after album")
                                    # Truncate caption on the first item
                                    if len(media) > 0:
-                                       media[0].caption = carousel_caption[:950] + "..."
+                                       media[0].caption = ""
+                                       description_extra = split_text(plain_text(carousel_caption)) + description_extra
                                        try:
                                            _sent = await context.bot.send_media_group(
                                                 chat_id=msg.chat_id,
@@ -1200,6 +1213,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Punto in classifica + rimozione del messaggio originale SOLO se abbiamo
             # davvero consegnato il contenuto nel gruppo (1 contenuto = 1 punto).
             if sent_ok:
+                for text in description_extra:
+                    await context.bot.send_message(chat_id=msg.chat_id, text=text, parse_mode=None)
                 note_download_success(detect_platform(url))
                 # Salva i file_id in cache per il rinvio istantaneo dei prossimi repost
                 try:
