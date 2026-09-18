@@ -22,6 +22,20 @@ ISSUES = {'session_rejected': 'sessione rifiutata: verifica il login e rinnova i
 
 SOCIAL_URLS = {'instagram': 'https://www.instagram.com/', 'facebook': 'https://www.facebook.com/',
                'youtube': 'https://www.youtube.com/', 'tiktok': 'https://www.tiktok.com/'}
+ANDROID_EXTENSION = 'https://addons.mozilla.org/it/firefox/addon/cookies-txt/'
+ANDROID_GUIDE = (
+    'Cookie da Android, senza PC\n\n'
+    '1. Usa Firefox per Android e installa cookies.txt di Lennon Hill dal pulsante qui sotto.\n'
+    '2. In Firefox apri instagram.com e accedi. Completa eventuali verifiche di Instagram. '
+    'La sessione dell\'app Instagram non viene letta.\n'
+    '3. Restando su Instagram, apri il menu Estensioni di Firefox, scegli cookies.txt '
+    'ed esporta SOLO il sito corrente (Current Site), non tutti i siti.\n'
+    '4. Torna qui, premi Aggiorna Instagram e allega il file .txt scaricato. '
+    'Oppure incolla il contenuto Netscape e premi Salva cookie.\n\n'
+    'I cookie valgono per tutti i bot: non serve aggiornare entrambi i Render. '
+    'La procedura resta manuale: una restrizione o una verifica richiede il tuo intervento. '
+    'Invia i cookie solo in questa chat privata amministratore.'
+)
 
 
 def keyboard(platform=None):
@@ -29,7 +43,8 @@ def keyboard(platform=None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('Aggiorna ' + LABELS[p], callback_data='cookies:' + p)] for p in platforms
     ] + ([[InlineKeyboardButton('Apri ' + LABELS[platform], url=SOCIAL_URLS[platform])]] if platform else [])
-      + [[InlineKeyboardButton('Stato cookie', callback_data='cookies:status')]])
+      + [[InlineKeyboardButton('Guida Android', callback_data='cookies:android')],
+         [InlineKeyboardButton('Stato cookie', callback_data='cookies:status')]])
 
 
 class CookieAdmin:
@@ -73,7 +88,7 @@ class CookieAdmin:
                 if platform in LABELS:
                     state = ISSUES.get(item.get('issue')) or STATES.get(item.get('state'), 'da verificare')
                     lines.append(LABELS[platform] + ': ' + state)
-            lines.append('\nGli aggiornamenti vengono salvati sul downloader e valgono per WhatsApp e Telegram.')
+            lines.append('\nGli aggiornamenti vengono salvati sul downloader e valgono per WhatsApp, Telegram e Discord.')
             await message.reply_text('\n'.join(lines), reply_markup=keyboard())
         except Exception:
             log.warning('Cookie status unavailable')
@@ -87,7 +102,9 @@ class CookieAdmin:
             'i cookie di questa piattaforma in formato Netscape. Incolla qui il contenuto, anche in più messaggi, '
             'poi premi Salva cookie. Oppure invia il file .txt. Hai 20 minuti. '
             'Il file sarà salvato sul downloader, anche per i prossimi riavvii.',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Annulla', callback_data='cookies:cancel')]]))
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('Guida Android', callback_data='cookies:android')],
+                [InlineKeyboardButton('Annulla', callback_data='cookies:cancel')]]))
 
     async def command(self, update, context):
         if not await self.allowed(update):
@@ -107,6 +124,11 @@ class CookieAdmin:
         action = query.data.removeprefix('cookies:')
         if action in LABELS:
             await self.select(update, action)
+        elif action == 'android':
+            await update.effective_message.reply_text(ANDROID_GUIDE, reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton('Installa cookies.txt in Firefox', url=ANDROID_EXTENSION)],
+                [InlineKeyboardButton('Apri Instagram (usa Firefox)', url=SOCIAL_URLS['instagram'])],
+                [InlineKeyboardButton('Aggiorna Instagram', callback_data='cookies:instagram')]]))
         elif action == 'cancel':
             self.pending.pop(update.effective_user.id, None)
             self.pasted.pop(update.effective_user.id, None)

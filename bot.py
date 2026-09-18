@@ -218,7 +218,8 @@ def build_cache_payload(captured: list, platform: str, title: str) -> dict:
         return None
     if len(captured) == 1:
         t, fid = captured[0]
-        return {'kind': t, 'fid': fid, 'platform': platform, 'title': title, 'description_version': 2}
+        return {'kind': t, 'fid': fid, 'platform': platform, 'title': title, 'description_version': 2,
+                'video_processing_version': 1}
     return {'kind': 'carousel', 'platform': platform, 'title': title, 'description_version': 2,
             'items': [{'t': t, 'fid': fid} for t, fid in captured]}
 
@@ -226,6 +227,8 @@ def build_cache_payload(captured: list, platform: str, title: str) -> dict:
 async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     """Rinvia un media gia' caricato usando il file_id (nessun download). True se riuscito."""
     photo = cached.get('kind') in ('photo', 'carousel')
+    if cached.get('kind') == 'video' and cached.get('video_processing_version') != 1:
+        return False  # Reprocess pre-subtitle videos once.
     if photo and cached.get('description_version') != 2:
         return False  # Old entries contain truncated descriptions: fetch again.
     sender = f'<a href="tg://user?id={msg.from_user.id}">{escape(msg.from_user.full_name)}</a>'

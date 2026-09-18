@@ -38,6 +38,18 @@ class AdminTests(unittest.IsolatedAsyncioTestCase):
         await self.admin.callback(u, self.context)
         self.assertNotIn(42, self.admin.pending)
 
+    async def test_android_guide_private_only_and_preserves_pending_upload(self):
+        u = update()
+        await self.admin.select(u, 'instagram')
+        u.callback_query.data = 'cookies:android'
+        await self.admin.callback(u, self.context)
+        self.assertIn('Firefox', u.effective_message.reply_text.call_args.args[0])
+        self.assertEqual(self.admin.pending[42][0], 'instagram')
+        for denied in (update(user=7), update(chat=-42, kind='group')):
+            denied.callback_query.data = 'cookies:android'
+            await self.admin.callback(denied, self.context)
+            denied.effective_message.reply_text.assert_not_awaited()
+
     async def test_upload_saved_remotely_and_retry_on_failure(self):
         u = update()
         self.admin.pending[42] = ('instagram', time.monotonic() + 100)
