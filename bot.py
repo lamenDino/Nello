@@ -482,10 +482,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 def link_key(url: str) -> str:
-    """Chiave normalizzata di un link (per 'gia' postato'): host+path senza query."""
-    u = url.strip().lower().split('?')[0].split('#')[0]
-    u = u.replace('https://', '').replace('http://', '').replace('www.', '')
-    return u.rstrip('/')
+    from link_keys import link_key as media_key
+    return media_key(url)
 
 
 # Rate limit anti-spam: max N download/ora per utente (in memoria, si azzera ai restart)
