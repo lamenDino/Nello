@@ -11,7 +11,7 @@ parti che li distinguono (mittente già renderizzato, icone, se mostrare l'invit
 """
 
 import os
-from urllib.parse import urlparse, urlsplit, urlunsplit, unquote_plus
+from urllib.parse import urlparse, urlsplit, urlunsplit, unquote_plus, parse_qs
 from html import escape as _html_escape
 
 VIDEO_EXTS = ('.mp4', '.mov', '.webm', '.mkv', '.avi', '.flv', '.ts')
@@ -122,6 +122,61 @@ def short_url(url: str) -> str:
     """
     try:
         parts = urlsplit(url)
+        import re
+        host = (parts.hostname or '').lower()
+        path = parts.path
+        params = parse_qs(parts.query)
+        def belongs(domain):
+            return host == domain or host.endswith('.' + domain)
+        def parameter(name, pattern):
+            value = params.get(name, [''])[0]
+            return value if re.fullmatch(pattern, value) else None
+        # Canonicalize only recognized content routes, never arbitrary URLs.
+        if belongs('instagram.com'):
+            match = re.fullmatch(r'/(p|reel|reels|tv)/([A-Za-z0-9_-]+)/?', path)
+            if match:
+                kind = 'reel' if match[1] == 'reels' else match[1]
+                return f'https://www.instagram.com/{kind}/{match[2]}/'
+        if belongs('facebook.com'):
+            ident = parameter('fbid', r'\d+')
+            if path.rstrip('/') in ('/photo', '/photo.php') and ident:
+                return f'https://www.facebook.com/photo/?fbid={ident}'
+            ident = parameter('v', r'\d+')
+            if path.rstrip('/') in ('/watch', '/video.php') and ident:
+                return f'https://www.facebook.com/watch/?v={ident}'
+            match = re.fullmatch(r'/(reel/\d+|[^/]+/(?:posts|videos)/[A-Za-z0-9._-]+|share/(?:[rvp]/)?[A-Za-z0-9]+)/?', path)
+            if match:
+                return f'https://www.facebook.com/{match[1]}/'
+            if path == '/permalink.php':
+                story = parameter('story_fbid', r'[A-Za-z0-9]+')
+                owner = parameter('id', r'\d+')
+                if story and owner:
+                    return f'https://www.facebook.com/permalink.php?story_fbid={story}&id={owner}'
+        if belongs('tiktok.com'):
+            if re.fullmatch(r'/@[^/]+/(?:video|photo)/\d+/?', path) or (
+                host in ('vm.tiktok.com', 'vt.tiktok.com') and re.fullmatch(r'/[A-Za-z0-9]+/?', path)
+            ) or re.fullmatch(r'/t/[A-Za-z0-9]+/?', path):
+                return urlunsplit(parts._replace(query='', fragment=''))
+        if belongs('youtube.com') or host == 'youtu.be':
+            ident = None
+            if host == 'youtu.be' and re.fullmatch(r'/[A-Za-z0-9_-]{11}/?', path):
+                ident = path.strip('/')
+            elif path == '/watch':
+                ident = parameter('v', r'[A-Za-z0-9_-]{11}')
+            match = re.fullmatch(r'/(shorts|live|embed)/([A-Za-z0-9_-]{11})/?', path)
+            if match:
+                base = f'https://www.youtube.com/{match[1]}/{match[2]}'
+            elif ident:
+                base = f'https://youtu.be/{ident}'
+            else:
+                base = None
+            if base:
+                timestamp = parameter('t', r'[0-9hms]+') or parameter('start', r'\d+')
+                return base + (f'?t={timestamp}' if timestamp else '')
+        if belongs('twitter.com') or belongs('x.com'):
+            match = re.fullmatch(r'/([^/]+)/status/(\d+)(?:/(?:photo|video)/\d+)?/?', path)
+            if match:
+                return f'https://x.com/{match[1]}/status/{match[2]}'
         tracking = {'fbclid', 'igsh', 'igshid'}
         query = '&'.join(
             item for item in parts.query.split('&')
@@ -249,7 +304,7 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
     # Link accorciato: su Telegram come testo cliccabile "apri originale" (nasconde
     # l'URL lungo); su Discord/WhatsApp l'URL senza i parametri di tracking.
     if dialect == 'html':
-        link_part = f'<a href="{_html_escape(url)}">apri originale</a>'
+        link_part = f'<a href="{_html_escape(short_url(url))}">apri originale</a>'
     else:
         link_part = cfg['wrap'](short_url(url))
 

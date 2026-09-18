@@ -232,7 +232,7 @@ async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     caption = (
         f"♻️ <b>Ripescato dalla cache</b> (già postato)\n"
         f"{random.choice(ICONS_USER)} <b>Rimesso da:</b> {sender}\n"
-        f"{random.choice(ICONS_LINK)} <b>Link:</b> {escape(url)}"
+        f"{random.choice(ICONS_LINK)} <b>Link:</b> {escape(core.short_url(url))}"
     )
     extra = []
     if photo:
