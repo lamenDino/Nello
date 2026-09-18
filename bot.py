@@ -1549,9 +1549,11 @@ async def serve_audio(request):
 
 
 async def run_web():
+    from facebook_resolver import handler as facebook_resolver_handler
     app = web.Application()
     app.add_routes([
         web.get("/", health),
+        web.get("/internal/facebook/{ident}", facebook_resolver_handler()),
         web.get("/l/{tok}", serve_link),
         web.get("/p/{tok}", serve_play),
         web.get("/a/{tok}", serve_audio),

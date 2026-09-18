@@ -5,6 +5,7 @@ git+https://github.com/yt-dlp/yt-dlp.git@master
 aiohttp>=3.9.0
 pytz
 cloudscraper
+curl_cffi==0.13.0
 firebase-admin>=6.5.0
 bgutil-ytdlp-pot-provider
 yt-dlp-ejs
