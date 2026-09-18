@@ -212,14 +212,14 @@ def _fid_from_msg(m):
     return None
 
 
-def build_cache_payload(captured: list, platform: str, title: str) -> dict:
+def build_cache_payload(captured: list, platform: str, title: str, video_processing_version=0) -> dict:
     """captured = lista di (tipo, file_id). Costruisce il payload da mettere in cache."""
     if not captured:
         return None
     if len(captured) == 1:
         t, fid = captured[0]
         return {'kind': t, 'fid': fid, 'platform': platform, 'title': title, 'description_version': 2,
-                'video_processing_version': 1}
+                'video_processing_version': video_processing_version}
     return {'kind': 'carousel', 'platform': platform, 'title': title, 'description_version': 2,
             'items': [{'t': t, 'fid': fid} for t, fid in captured]}
 
@@ -227,7 +227,7 @@ def build_cache_payload(captured: list, platform: str, title: str) -> dict:
 async def resend_from_cache(context, msg, cached: dict, url: str) -> bool:
     """Rinvia un media gia' caricato usando il file_id (nessun download). True se riuscito."""
     photo = cached.get('kind') in ('photo', 'carousel')
-    if cached.get('kind') == 'video' and cached.get('video_processing_version') != 1:
+    if cached.get('kind') == 'video' and cached.get('video_processing_version') != 2:
         return False  # Reprocess pre-subtitle videos once.
     if photo and cached.get('description_version') != 2:
         return False  # Old entries contain truncated descriptions: fetch again.
@@ -1221,7 +1221,8 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 note_download_success(detect_platform(url))
                 # Salva i file_id in cache per il rinvio istantaneo dei prossimi repost
                 try:
-                    payload = build_cache_payload(captured, detect_platform(url), raw_title)
+                    payload = build_cache_payload(captured, detect_platform(url), raw_title,
+                                                  info.get('video_processing_version', 0))
                     if payload:
                         await ranking_store.set_cached(key, payload)
                 except Exception as e:

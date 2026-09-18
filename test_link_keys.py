@@ -2,6 +2,13 @@ import unittest
 from link_keys import link_key
 
 
+class FacebookPostCacheTests(unittest.TestCase):
+    def test_old_share_cache_is_invalidated_and_token_case_preserved(self):
+        key = link_key('https://www.facebook.com/share/14suwq5RADU/?mibextid=tracking')
+        self.assertEqual(key, 'facebook-post-v2/share/14suwq5RADU')
+        self.assertNotEqual(key, link_key('https://www.facebook.com/share/14suwq5radu/'))
+
+
 class LinkKeyTests(unittest.TestCase):
     def test_photo_ids_never_share_cache(self):
         self.assertNotEqual(link_key('https://www.facebook.com/photo/?fbid=123'),
