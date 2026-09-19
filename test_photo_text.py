@@ -5,12 +5,14 @@ import photo_text as pt
 
 
 class DescriptionTests(unittest.IsolatedAsyncioTestCase):
-    def test_whatsapp_complete_including_hashtags(self):
+    def test_whatsapp_long_photos_are_compact(self):
         description = ('Testo completo con emoji \U0001f600 & dettagli.\n' * 200) + '#finale'
         caption = core.build_caption({'type': 'carousel', 'files': ['photo.jpg']},
                                      'https://facebook.com/photo/?fbid=123', 'Nello',
                                      description, dialect='whatsapp', max_desc=1500)
-        self.assertIn(description, caption)
+        self.assertNotIn(description, caption)
+        self.assertLess(len(caption), 800)
+        self.assertNotIn('#finale', caption)
         parts = pt.split_text(caption)
         self.assertEqual(''.join(parts), caption)
         self.assertTrue(all(len(p.encode('utf-16-le')) // 2 <= 3500 for p in parts))

@@ -297,6 +297,10 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
     inviato = "inviata" if label == "Foto" else "inviato"
 
     rt = raw_title or 'Contenuto'
+    summarized = label != 'Video' and dialect in ('whatsapp', 'discord') and len(rt) > 600
+    if summarized:
+        from caption_summary import summarize_photo
+        rt = summarize_photo(rt)
     if label == 'Video' and max_desc and len(rt) > max_desc:
         rt = rt[:max_desc].rstrip() + '…'
     clean = (clean_title(rt, info.get('uploader') or info.get('channel')) or rt) if label == 'Video' else rt
@@ -316,16 +320,17 @@ def build_caption(info: dict, url: str, sender: str, raw_title: str, *,
 
     # Info: descrizione lunga COMPATTA (tap per espandere) su Telegram (blockquote
     # espandibile) e Discord (spoiler); WhatsApp non ha collapse -> anteprima corta.
-    collapse = cfg.get('collapse')
+    meta_label = 'Riassunto:' if summarized else 'Info:'
+    collapse = cfg.get('collapse') if not summarized else None
     if label == 'Video':
         pass  # Per i video bastano sito, mittente e link originale.
     elif len(clean) > SPOILER_MIN_LEN:
         if collapse:
-            lines.append(f"{icons['meta']} {cfg['b']('Info:')}\n{collapse(cfg['esc'](clean))}")
+            lines.append(f"{icons['meta']} {cfg['b'](meta_label)}\n{collapse(cfg['esc'](clean))}")
         else:
-            lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}")
+            lines.append(f"{icons['meta']} {cfg['b'](meta_label)} {cfg['esc'](clean)}")
     else:
-        lines.append(f"{icons['meta']} {cfg['b']('Info:')} {cfg['esc'](clean)}")
+        lines.append(f"{icons['meta']} {cfg['b'](meta_label)} {cfg['esc'](clean)}")
 
     # Link "scarica audio": per i video e le slideshow TikTok (che hanno la musica).
     show_audio = (label == 'Video') or (label in ('Foto', 'Contenuto') and detect_platform(url) == 'TikTok')
