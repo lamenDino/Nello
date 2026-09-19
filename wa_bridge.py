@@ -280,6 +280,8 @@ def build_app(ns):
         return web.Response(text="OK")
 
     app = web.Application(client_max_size=8 * 1024 * 1024)
+    from voice_messages import whatsapp_voice
+    app.router.add_post('/voice', whatsapp_voice)
     app.add_routes([
         web.get('/ping', ping),
         web.post('/weekly-rankings', weekly_rankings),

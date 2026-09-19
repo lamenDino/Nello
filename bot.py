@@ -1713,6 +1713,8 @@ def main():
     )
     application = Application.builder().token(TOKEN).request(request_settings).build()
     print("Application built.")
+    from voice_messages import telegram_voice
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, telegram_voice, block=False))
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("classifica", classifica_cmd))

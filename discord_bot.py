@@ -456,6 +456,8 @@ def build_client(ns):
     async def on_message(message):
         if message.author.bot:
             return
+        from voice_messages import discord_voice
+        await discord_voice(message)
         content = (message.content or '').strip()
         if not content:
             return

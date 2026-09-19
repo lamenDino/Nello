@@ -19,9 +19,12 @@ const {
   BufferJSON,
   proto,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
+  normalizeMessageContent,
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
+const { transcribeVoice } = require('./voice_bridge');
 
 const BRIDGE = process.env.WA_BRIDGE_URL || 'http://127.0.0.1:8765';
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
@@ -138,6 +141,21 @@ async function handleMessages(sock, upsert) {
       if (!m.message || m.key.fromMe) continue;
       const jid = m.key.remoteJid;
       if (!jid || jid === 'status@broadcast') continue;
+
+      const content = normalizeMessageContent(m.message);
+      const audio = content && content.audioMessage;
+      if (audio) {
+        if (Number(audio.seconds || 0) > 180 || Number(audio.fileLength || 0) > 8 * 1024 * 1024) continue;
+        // Stream decrypted bytes to the local bridge; never buffer the whole note.
+        const stream = await downloadMediaMessage(m, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+        try {
+          const result = await transcribeVoice(BRIDGE, `${jid}:${m.key.id}`, stream);
+          for (const text of result.parts || []) {
+            await sock.sendMessage(jid, { text }, { quoted: m });
+          }
+        } finally { stream.destroy(); }
+        continue;
+      }
 
       // --- Reazione (voto) ---
       const rm = m.message.reactionMessage;
