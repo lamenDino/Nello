@@ -39,7 +39,21 @@ def release():
 
 
 def eligible(size, duration=0):
+    if hasattr(duration, 'total_seconds'):
+        duration = duration.total_seconds()
     return 0 < int(size or 0) <= MAX_BYTES and 0 <= float(duration or 0) <= MAX_SECONDS
+
+
+def outcome(result):
+    if result.get('success') and result.get('language') == 'it' and result.get('text'):
+        return {'text': result['text']}
+    reason = result.get('skipped') or result.get('reason')
+    log.info('Voice result: %s', reason or 'failed')
+    if reason in ('not_italian', 'not_italian_or_uncertain'):
+        return {}
+    if reason in ('uncertain_language', 'no_clear_speech'):
+        return {'notice': 'Non riesco a riconoscere con sicurezza le parole o la lingua di questo vocale. Prova con una frase un po\u2019 pi\u00f9 lunga e chiara: trascrivo solo l\u2019italiano.'}
+    return {'notice': 'Non sono riuscito a trascrivere questo vocale. Riprova tra poco; l\u2019audio originale resta nella chat.'}
 
 
 async def transcribe_file(path):
@@ -73,14 +87,14 @@ async def transcribe_file(path):
                     job = await response.json()
                 if job.get('state') == 'done':
                     result = job.get('result', {})
-                    if result.get('success') and result.get('language') == 'it' and isinstance(result.get('text'), str):
-                        return {'text': result['text']}
-                    return {}
+                    if result.get('language') not in (None, 'it'):
+                        return {}
+                    return outcome(result)
                 await asyncio.sleep(2)
             return {}
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             log.warning('Voice transcription unavailable')
-            return {}
+            return outcome({'reason': 'unavailable'})
         finally:
             try:
                 async with session.delete(base + '/jobs/' + ident, timeout=aiohttp.ClientTimeout(total=10)):
@@ -92,6 +106,12 @@ async def transcribe_file(path):
 def reply_parts(text, limit=3500):
     from photo_text import split_text
     return split_text('Trascrizione del vocale:\n' + text, limit)
+
+
+def result_parts(result, limit=3500):
+    if result.get('text'):
+        return reply_parts(result['text'], limit)
+    return [result['notice']] if result.get('notice') else []
 
 
 async def telegram_voice(update, context):
@@ -110,7 +130,8 @@ async def telegram_voice(update, context):
             remote = await media.get_file()
             await remote.download_to_drive(custom_path=path)
             result = await transcribe_file(path)
-        for text in reply_parts(result['text']) if result.get('text') else []:
+        # Reply only: never delete or replace the original audio message.
+        for text in result_parts(result):
             await message.reply_text(text, parse_mode=None, do_quote=True)
     except Exception as exc:
         log.warning('Telegram voice failed: %s', type(exc).__name__)
@@ -133,7 +154,7 @@ async def discord_voice(message):
                 path = Path(directory) / 'input.audio'
                 await attachment.save(path)
                 result = await transcribe_file(path)
-            for text in reply_parts(result['text'], 1900) if result.get('text') else []:
+            for text in result_parts(result, 1900):
                 await message.reply(text, allowed_mentions=discord.AllowedMentions.none(), mention_author=False)
         except Exception as exc:
             log.warning('Discord voice failed: %s', type(exc).__name__)
@@ -158,6 +179,6 @@ async def whatsapp_voice(request):
                             raise web.HTTPRequestEntityTooLarge(max_size=MAX_BYTES, actual_size=size)
                         output.write(chunk)
             result = await transcribe_file(path)
-        return web.json_response({'parts': reply_parts(result['text'])} if result.get('text') else {})
+        return web.json_response({'parts': result_parts(result)})
     finally:
         release()

@@ -154,6 +154,7 @@ async function handleMessages(sock, upsert) {
             await sock.sendMessage(jid, { text }, { quoted: m });
           }
         } finally { stream.destroy(); }
+        // Voice messages stay in the chat; never enter the link deletion branch.
         continue;
       }
 

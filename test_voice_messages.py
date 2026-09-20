@@ -11,7 +11,7 @@ class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
         media = SimpleNamespace(file_size=100, duration=12, get_file=AsyncMock(
             return_value=SimpleNamespace(download_to_drive=AsyncMock())))
         message = SimpleNamespace(voice=media, audio=None, from_user=SimpleNamespace(is_bot=False),
-                                  chat_id=5, message_id=8, reply_text=AsyncMock())
+                                  chat_id=5, message_id=8, reply_text=AsyncMock(), delete=AsyncMock())
         with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={'text': 'Ciao ragazzi.'})):
             await voice.telegram_voice(SimpleNamespace(effective_message=message), None)
@@ -21,6 +21,12 @@ class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={})):
             await voice.telegram_voice(SimpleNamespace(effective_message=message), None)
         message.reply_text.assert_not_awaited()
+        message.delete.assert_not_awaited()
+
+    def test_uncertain_voice_has_feedback_foreign_voice_is_ignored(self):
+        self.assertTrue(voice.result_parts(voice.outcome({'success': True, 'skipped': 'uncertain_language'})))
+        self.assertTrue(voice.result_parts(voice.outcome({'success': False, 'reason': 'recognition_failed'})))
+        self.assertEqual(voice.result_parts(voice.outcome({'success': True, 'skipped': 'not_italian'})), [])
 
     def test_limits_deduplication_and_readable_parts(self):
         self.assertFalse(voice.eligible(9 * 1024 * 1024, 30))
