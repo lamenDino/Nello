@@ -32,13 +32,27 @@ async def remote_download(url, kind='video', target='', max_bytes=16 * 1024 * 10
                 await asyncio.sleep(3)
             else:
                 raise RuntimeError('remote downloader unavailable')
-            async with session.post(base + '/jobs', json={'id': ident, 'url': url, 'kind': kind,
-                                                          'target': target, 'max_bytes': max_bytes}) as response:
+            request_body = {'id': ident, 'url': url, 'kind': kind,
+                            'target': target, 'max_bytes': max_bytes}
+            async with session.post(base + '/jobs', json=request_body) as response:
                 response.raise_for_status()
+            restarts = 0
             for attempt in range(400):
                 async with session.get(base + '/jobs/' + ident) as response:
-                    response.raise_for_status()
-                    job = await response.json()
+                    missing = response.status == 404
+                    if not missing:
+                        response.raise_for_status()
+                        job = await response.json()
+                if missing:
+                    if restarts >= 2:
+                        raise RuntimeError('remote job repeatedly lost after restart')
+                    restarts += 1
+                    log.info('Downloader restarted; resubmitting lost job (attempt %d/2)', restarts)
+                    await asyncio.sleep(3)
+                    # Same ID makes submission idempotent during a rolling deploy.
+                    async with session.post(base + '/jobs', json=request_body) as response:
+                        response.raise_for_status()
+                    continue
                 if job['state'] == 'done':
                     break
                 await asyncio.sleep(2)
