@@ -105,7 +105,7 @@ async def transcribe_file(path):
 
 def reply_parts(text, limit=3500):
     from photo_text import split_text
-    return split_text('Trascrizione del vocale:\n' + text, limit)
+    return split_text('Trascrizione del vocale:\n\n' + text, limit)
 
 
 def result_parts(result, limit=3500):
