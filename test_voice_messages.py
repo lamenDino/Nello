@@ -15,7 +15,7 @@ class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
         with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={'text': 'Ciao ragazzi.'})):
             await voice.telegram_voice(SimpleNamespace(effective_message=message), None)
-        message.reply_text.assert_awaited_once_with('Trascrizione del vocale:\nCiao ragazzi.', parse_mode=None, do_quote=True)
+        message.reply_text.assert_awaited_once_with('Trascrizione del vocale:\n\nCiao ragazzi.', parse_mode=None, do_quote=True)
         message.reply_text.reset_mock()
         with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={})):
@@ -48,7 +48,7 @@ class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
         with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={'text': 'Ciao a tutti.'})):
             await voice.discord_voice(message)
-        self.assertEqual(message.reply.await_args.args[0], 'Trascrizione del vocale:\nCiao a tutti.')
+        self.assertEqual(message.reply.await_args.args[0], 'Trascrizione del vocale:\n\nCiao a tutti.')
         self.assertFalse(message.reply.await_args.kwargs['mention_author'])
         self.assertFalse(message.reply.await_args.kwargs['allowed_mentions'].everyone)
         message.reply.reset_mock()
