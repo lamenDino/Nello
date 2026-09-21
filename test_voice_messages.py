@@ -48,12 +48,15 @@ class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
         with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={'text': 'Ciao ragazzi.'})):
             await voice.telegram_voice(SimpleNamespace(effective_message=message), None)
-        message.reply_text.assert_awaited_once_with('Trascrizione del vocale:\n\nCiao ragazzi.', parse_mode=None, do_quote=True)
+        message.reply_text.assert_awaited_once()
+        self.assertIn('Audio ricevuto', message.reply_text.await_args.args[0])
+        message.reply_text.return_value.edit_text.assert_awaited_with('Trascrizione del vocale:\n\nCiao ragazzi.', parse_mode=None)
         message.reply_text.reset_mock()
         with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
              patch('voice_messages.transcribe_file', new=AsyncMock(return_value={})):
             await voice.telegram_voice(SimpleNamespace(effective_message=message), None)
-        message.reply_text.assert_not_awaited()
+        message.reply_text.assert_awaited_once()
+        self.assertNotIn('Trascrizione del vocale:', message.reply_text.return_value.edit_text.await_args.args[0])
         message.delete.assert_not_awaited()
 
     def test_uncertain_voice_has_feedback_foreign_voice_is_ignored(self):

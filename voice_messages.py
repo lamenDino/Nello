@@ -78,7 +78,7 @@ async def transcribe_file(path, on_progress=None):
                     pass
                 await asyncio.sleep(3)
             else:
-                return {}
+                return outcome({'reason': 'unavailable'})
             with open(path, 'rb') as audio:
                 async with session.post(base + '/voice-jobs/' + ident, data=audio,
                                         headers={'Content-Type': 'application/octet-stream'}) as response:
@@ -101,7 +101,7 @@ async def transcribe_file(path, on_progress=None):
                     except Exception as exc:
                         log.warning('Voice progress delivery failed: %s', type(exc).__name__)
                 await asyncio.sleep(2)
-            return {}
+            return outcome({'reason': 'timeout'})
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             log.warning('Voice transcription unavailable')
             return outcome({'reason': 'unavailable'})
@@ -139,6 +139,9 @@ class LiveReply:
         self.send, self.edit, self.limit = send, edit, limit
         self.message = None
 
+    async def start(self):
+        self.message = await self.send('Audio ricevuto. Controllo la lingua e preparo la trascrizione; potrebbe richiedere alcuni minuti. L’audio originale resta nella chat.')
+
     async def update(self, progress):
         text = progress_text(progress, self.limit)
         if not text:
@@ -174,6 +177,8 @@ async def telegram_voice(update, context):
     live = LiveReply(lambda text: message.reply_text(text, parse_mode=None, do_quote=True),
                      lambda reply, text: reply.edit_text(text, parse_mode=None))
     try:
+        await live.start()
+        log.info('Telegram voice accepted: duration=%s', media.duration)
         with tempfile.TemporaryDirectory(prefix='voice_tg_') as directory:
             path = Path(directory) / 'input.audio'
             remote = await media.get_file()
@@ -181,8 +186,13 @@ async def telegram_voice(update, context):
             result = await transcribe_file(path, on_progress=live.update)
         # Reply only: never delete or replace the original audio message.
         await live.finish(result)
+        log.info('Telegram voice reply delivered: transcript=%s', bool(result.get('text')))
     except Exception as exc:
         log.warning('Telegram voice failed: %s', type(exc).__name__)
+        try:
+            await live.finish(outcome({'reason': 'unavailable'}))
+        except Exception as delivery_exc:
+            log.warning('Telegram voice failure notice unavailable: %s', type(delivery_exc).__name__)
     finally:
         release()
 
