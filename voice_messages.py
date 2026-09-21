@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import uuid
+import json
 
 import aiohttp
 
@@ -56,7 +57,7 @@ def outcome(result):
     return {'notice': 'Non sono riuscito a trascrivere questo vocale. Riprova tra poco; l\u2019audio originale resta nella chat.'}
 
 
-async def transcribe_file(path):
+async def transcribe_file(path, on_progress=None):
     if not eligible(Path(path).stat().st_size):
         return {}
     base = os.getenv('DOWNLOADER_URL', '').rstrip('/')
@@ -64,6 +65,7 @@ async def transcribe_file(path):
     if not base or not token:
         return {}
     ident = str(uuid.uuid4())
+    previous_progress = None
     timeout = aiohttp.ClientTimeout(total=150, sock_connect=20)
     async with aiohttp.ClientSession(headers={'Authorization': 'Bearer ' + token}, timeout=timeout) as session:
         try:
@@ -90,6 +92,14 @@ async def transcribe_file(path):
                     if result.get('language') not in (None, 'it'):
                         return {}
                     return outcome(result)
+                progress = job.get('progress')
+                if (on_progress and isinstance(progress, dict) and progress.get('language') == 'it'
+                        and progress.get('text') and progress != previous_progress):
+                    previous_progress = progress
+                    try:
+                        await on_progress(progress)
+                    except Exception as exc:
+                        log.warning('Voice progress delivery failed: %s', type(exc).__name__)
                 await asyncio.sleep(2)
             return {}
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
@@ -114,6 +124,43 @@ def result_parts(result, limit=3500):
     return [result['notice']] if result.get('notice') else []
 
 
+def progress_text(progress, limit=3500):
+    if progress.get('language') != 'it' or not progress.get('text'):
+        return ''
+    done, total = int(progress.get('completed', 0)), int(progress.get('total', 0))
+    status = 'Revisione del testo in corso...' if total and done == total else f'Trascrizione in corso: {done}/{total}'
+    parts = reply_parts(progress['text'], limit - 100)
+    return parts[0] + ('\n...' if len(parts) > 1 else '') + '\n\n' + status
+
+
+class LiveReply:
+    """Edit one provisional bot reply; never touch the user's original audio."""
+    def __init__(self, send, edit, limit=3500):
+        self.send, self.edit, self.limit = send, edit, limit
+        self.message = None
+
+    async def update(self, progress):
+        text = progress_text(progress, self.limit)
+        if not text:
+            return
+        if self.message is None:
+            self.message = await self.send(text)
+        else:
+            await self.edit(self.message, text)
+
+    async def finish(self, result):
+        parts = result_parts(result, self.limit)
+        if self.message is not None:
+            text = parts.pop(0) if parts else 'Trascrizione non completata; l’audio originale resta nella chat.'
+            try:
+                await self.edit(self.message, text)
+            except Exception:
+                # Deliver the final text even if editing the provisional reply fails.
+                await self.send(text)
+        for text in parts:
+            await self.send(text)
+
+
 async def telegram_voice(update, context):
     message = update.effective_message
     media = message.voice or message.audio
@@ -124,15 +171,16 @@ async def telegram_voice(update, context):
     key = f'tg:{message.chat_id}:{message.message_id}'
     if not claim(key):
         return
+    live = LiveReply(lambda text: message.reply_text(text, parse_mode=None, do_quote=True),
+                     lambda reply, text: reply.edit_text(text, parse_mode=None))
     try:
         with tempfile.TemporaryDirectory(prefix='voice_tg_') as directory:
             path = Path(directory) / 'input.audio'
             remote = await media.get_file()
             await remote.download_to_drive(custom_path=path)
-            result = await transcribe_file(path)
+            result = await transcribe_file(path, on_progress=live.update)
         # Reply only: never delete or replace the original audio message.
-        for text in result_parts(result):
-            await message.reply_text(text, parse_mode=None, do_quote=True)
+        await live.finish(result)
     except Exception as exc:
         log.warning('Telegram voice failed: %s', type(exc).__name__)
     finally:
@@ -149,13 +197,14 @@ async def discord_voice(message):
             continue
         if not claim(f'dc:{message.id}:{attachment.id}'):
             continue
+        live = LiveReply(lambda text: message.reply(text, allowed_mentions=discord.AllowedMentions.none(), mention_author=False),
+                         lambda reply, text: reply.edit(content=text, allowed_mentions=discord.AllowedMentions.none()), 1900)
         try:
             with tempfile.TemporaryDirectory(prefix='voice_dc_') as directory:
                 path = Path(directory) / 'input.audio'
                 await attachment.save(path)
-                result = await transcribe_file(path)
-            for text in result_parts(result, 1900):
-                await message.reply(text, allowed_mentions=discord.AllowedMentions.none(), mention_author=False)
+                result = await transcribe_file(path, on_progress=live.update)
+            await live.finish(result)
         except Exception as exc:
             log.warning('Discord voice failed: %s', type(exc).__name__)
         finally:
@@ -178,6 +227,17 @@ async def whatsapp_voice(request):
                         if size > MAX_BYTES:
                             raise web.HTTPRequestEntityTooLarge(max_size=MAX_BYTES, actual_size=size)
                         output.write(chunk)
+            if 'application/x-ndjson' in request.headers.get('Accept', ''):
+                response = web.StreamResponse(headers={'Content-Type': 'application/x-ndjson'})
+                await response.prepare(request)
+                async def progress(value):
+                    text = progress_text(value)
+                    if text:
+                        await response.write((json.dumps({'type': 'progress', 'text': text}) + '\n').encode())
+                result = await transcribe_file(path, on_progress=progress)
+                await response.write((json.dumps({'type': 'done', 'parts': result_parts(result)}) + '\n').encode())
+                await response.write_eof()
+                return response
             result = await transcribe_file(path)
         return web.json_response({'parts': result_parts(result)})
     finally:

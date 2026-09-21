@@ -7,6 +7,39 @@ import voice_messages as voice
 
 
 class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_reply_edits_one_bot_message_and_replaces_draft_with_final(self):
+        sent = object()
+        send, edit = AsyncMock(return_value=sent), AsyncMock()
+        live = voice.LiveReply(send, edit)
+        await live.update({'language': 'en', 'text': 'Hello', 'completed': 1, 'total': 2})
+        send.assert_not_awaited()
+        await live.update({'language': 'it', 'text': 'Ciao', 'completed': 1, 'total': 2})
+        await live.update({'language': 'it', 'text': 'Ciao ragazzi', 'completed': 2, 'total': 2})
+        await live.finish({'text': 'Ciao, ragazzi.'})
+        send.assert_awaited_once()
+        self.assertIn('1/2', send.await_args.args[0])
+        self.assertEqual(edit.await_count, 2)
+        edit.assert_awaited_with(sent, 'Trascrizione del vocale:\n\nCiao, ragazzi.')
+
+    async def test_streaming_whatsapp_keeps_progress_separate_from_final(self):
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+        async def fake(path, on_progress=None):
+            await on_progress({'language': 'it', 'text': 'Ciao', 'completed': 1, 'total': 2})
+            return {'text': 'Ciao ragazzi.'}
+        app = web.Application()
+        app.router.add_post('/voice', voice.whatsapp_voice)
+        async with TestClient(TestServer(app)) as client:
+            with patch('voice_messages.claim', return_value=True), patch('voice_messages.release'), \
+                 patch('voice_messages.transcribe_file', side_effect=fake):
+                response = await client.post('/voice', data=b'audio', headers={
+                    'X-Voice-Key': 'test-live', 'Accept': 'application/x-ndjson'})
+                import json
+                lines = [json.loads(line) for line in (await response.text()).splitlines()]
+                self.assertEqual(lines[0]['type'], 'progress')
+                self.assertEqual(lines[1]['type'], 'done')
+                self.assertEqual(lines[1]['parts'], ['Trascrizione del vocale:\n\nCiao ragazzi.'])
+
     async def test_telegram_reply_only_for_italian_and_keep_original(self):
         media = SimpleNamespace(file_size=100, duration=12, get_file=AsyncMock(
             return_value=SimpleNamespace(download_to_drive=AsyncMock())))
@@ -81,6 +114,39 @@ class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
                 with patch.dict(os.environ, {'DOWNLOADER_URL': str(client.make_url('')).rstrip('/'), 'DOWNLOADER_TOKEN': 'test'}):
                     self.assertEqual(await voice.transcribe_file(path), {})
         self.assertEqual(len(deleted), 1)
+
+    async def test_polling_delivers_progress_once_before_final(self):
+        import os
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+        states = []
+        progress = {'language': 'it', 'text': 'Ciao', 'completed': 1, 'total': 2}
+        async def health(request):
+            return web.json_response({'status': 'ok'})
+        async def upload(request):
+            await request.read()
+            return web.json_response({}, status=202)
+        async def status(request):
+            states.append('poll')
+            if states.count('poll') < 3:
+                return web.json_response({'state': 'running', 'progress': progress})
+            return web.json_response({'state': 'done', 'result': {'success': True, 'language': 'it', 'text': 'Ciao ragazzi.'}})
+        async def remove(request):
+            return web.json_response({'ok': True})
+        async def received(value):
+            states.append('progress')
+            self.assertEqual(value, progress)
+        app = web.Application()
+        app.add_routes([web.get('/healthz', health), web.post('/voice-jobs/{ident}', upload),
+                        web.get('/jobs/{ident}', status), web.delete('/jobs/{ident}', remove)])
+        async with TestClient(TestServer(app)) as client:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'audio'; path.write_bytes(b'voice')
+                with patch.dict(os.environ, {'DOWNLOADER_URL': str(client.make_url('')).rstrip('/'), 'DOWNLOADER_TOKEN': 'test'}), \
+                     patch('voice_messages.asyncio.sleep', new=AsyncMock()):
+                    result = await voice.transcribe_file(path, on_progress=received)
+        self.assertEqual(result, {'text': 'Ciao ragazzi.'})
+        self.assertEqual(states, ['poll', 'progress', 'poll', 'poll'])
 
 
 if __name__ == '__main__':

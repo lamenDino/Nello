@@ -24,7 +24,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
-const { transcribeVoice } = require('./voice_bridge');
+const { transcribeVoice, createVoiceReply } = require('./voice_bridge');
 
 const BRIDGE = process.env.WA_BRIDGE_URL || 'http://127.0.0.1:8765';
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
@@ -149,10 +149,9 @@ async function handleMessages(sock, upsert) {
         // Stream decrypted bytes to the local bridge; never buffer the whole note.
         const stream = await downloadMediaMessage(m, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
         try {
-          const result = await transcribeVoice(BRIDGE, `${jid}:${m.key.id}`, stream);
-          for (const text of result.parts || []) {
-            await sock.sendMessage(jid, { text }, { quoted: m });
-          }
+          const live = createVoiceReply(sock, jid, m);
+          const result = await transcribeVoice(BRIDGE, `${jid}:${m.key.id}`, stream, live.update);
+          await live.finish(result);
         } finally { stream.destroy(); }
         // Voice messages stay in the chat; never enter the link deletion branch.
         continue;
