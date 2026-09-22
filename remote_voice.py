@@ -187,6 +187,8 @@ async def transcribe(source):
                     form.add_field('model', MODEL)
                     form.add_field('response_format', 'verbose_json')
                     form.add_field('temperature', '0')
+                    form.add_field('timestamp_granularities[]', 'word')
+                    form.add_field('timestamp_granularities[]', 'segment')
                     # No language/prompt forcing: foreign notes must be detected,
                     # not translated or coerced into Italian.
                     async with session.post(ENDPOINT, data=form, headers={'Authorization': 'Bearer ' + key},
@@ -202,9 +204,17 @@ async def transcribe(source):
                             raw.extend(chunk)
                             if len(raw) > 1024 * 1024:
                                 raise ValueError('oversized response')
-                        result = interpret(json.loads(raw), duration)
+                        data = json.loads(raw)
+                        result = interpret(data, duration)
                         if result.get('text'):
-                            result['text'] = await punctuate(session, key, result['text'])
+                            from voice_speakers import diarize, label_text
+                            analysis = asyncio.create_task(diarize(audio))
+                            try:
+                                result['text'] = await punctuate(session, key, result['text'])
+                                result['text'] = label_text(result['text'], data.get('words'), await analysis)
+                            finally:
+                                analysis.cancel()
+                                await asyncio.gather(analysis, return_exceptions=True)
                         log.info('Remote voice finished: provider=groq seconds=%.1f status=%s',
                                  time.monotonic() - started, result.get('skipped') or result.get('reason') or 'transcribed')
                         return result

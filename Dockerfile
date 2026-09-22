@@ -30,6 +30,17 @@ COPY requirements.txt .
 RUN pip install --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
+# Small CPU-only speaker models. Download once at build time and verify hashes.
+RUN mkdir -p /opt/voice-speakers \
+ && curl -fSL --retry 3 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_speakerverification_speakernet.onnx -o /opt/voice-speakers/speaker.onnx \
+ && echo 'd204dc8aac0014b8543f05fc8e310510c7022bc65b6452c203ec205ef7a66b23  /opt/voice-speakers/speaker.onnx' | sha256sum -c - \
+ && curl -fSL --retry 3 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 -o /tmp/speakers.tar.bz2 \
+ && echo '24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488  /tmp/speakers.tar.bz2' | sha256sum -c - \
+ && tar -xjf /tmp/speakers.tar.bz2 -C /tmp \
+ && cp /tmp/sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx /opt/voice-speakers/segmentation.onnx \
+ && cp /tmp/sherpa-onnx-pyannote-segmentation-3-0/LICENSE /opt/voice-speakers/SEGMENTATION-LICENSE \
+ && rm -rf /tmp/sherpa-onnx-pyannote-segmentation-3-0 /tmp/speakers.tar.bz2
+
 # Dipendenze del worker WhatsApp (Baileys). Buildato sempre; il worker viene
 # avviato da start.sh solo se WHATSAPP_ENABLED=1.
 COPY wa/package.json /app/wa/package.json

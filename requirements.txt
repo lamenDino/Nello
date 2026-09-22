@@ -10,5 +10,7 @@ firebase-admin>=6.5.0
 bgutil-ytdlp-pot-provider
 yt-dlp-ejs
 discord.py>=2.3.0
+sherpa-onnx==1.13.8
+numpy==2.2.6
 
 

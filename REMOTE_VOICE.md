@@ -67,3 +67,37 @@ attivo senza verificarne l'impostazione.
 I test non inviano audio a Groq: usano un server HTTP locale. Le prove reali
 richiedono una chiave Free e audio autorizzato. Misurare separatamente il tempo
 del servizio remoto e quello completo di download/consegna nella chat.
+
+## Interlocutori: Voce 1, Voce 2
+
+La diarizzazione opzionale analizza l'audio localmente con sherpa-onnx e modelli
+ONNX compatti, mentre Groq continua a riconoscere le parole. Non richiede un
+altro account né invia audio a un altro servizio. I modelli vengono scaricati
+durante la build con verifica SHA-256.
+
+- Le etichette sono numerate per ordine di apparizione e valgono solo per quel
+  vocale. Non identificano persone, genere o età; non esiste un archivio di voci.
+- I turni sono allineati ai timestamp delle parole restituiti da Groq. Il testo
+  viene conservato; non si deducono interlocutori dalle frasi o dai nomi citati.
+- Un solo interlocutore mantiene la trascrizione normale. Passaggi sovrapposti
+  possono essere indicati come “Voce non distinta”. Allineamenti insufficienti
+  o incoerenti mantengono il testo senza etichette.
+- È un riconoscimento automatico approssimativo: rumore, voci simili, interventi
+  brevissimi e cambi di microfono possono causare errori.
+- Massimo un processo alla volta, 20 secondi di analisi e controllo della memoria.
+  Se queste risorse non sono disponibili, il vocale arriva senza etichette.
+  `VOICE_SPEAKERS=0` disattiva la funzione; il valore predefinito è `1`.
+- `VOICE_SPEAKER_MODELS` indica la cartella con `segmentation.onnx` e `speaker.onnx`;
+  in produzione è `/opt/voice-speakers`. Audio e risultati temporanei vengono
+  rimossi alla fine della richiesta.
+
+Modelli e attribuzioni:
+
+- Segmentazione pyannote 3.0, Copyright CNRS, licenza MIT inclusa nell'immagine
+  come `/opt/voice-speakers/SEGMENTATION-LICENSE`.
+- NVIDIA NeMo SpeakerNet-M (`speakerverification_speakernet`), modello per
+  estrazione di caratteristiche della voce; licenza del NeMo Toolkit secondo
+  la [scheda ufficiale](https://catalog.ngc.nvidia.com/orgs/nvidia/nemo/models/speakerverification_speakernet).
+- [Modelli ONNX distribuiti da sherpa-onnx](https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/index.html).
+
+Verifica aggiuntiva: `python -m unittest test_voice_speakers`.
