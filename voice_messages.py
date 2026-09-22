@@ -50,6 +50,12 @@ def outcome(result):
         return {'text': result['text']}
     reason = result.get('skipped') or result.get('reason')
     log.info('Voice result: %s', reason or 'failed')
+    if reason == 'remote_rate_limit':
+        return {'notice': 'Il servizio di trascrizione ha raggiunto il limite di utilizzo. Riprova più tardi; l’audio originale resta nella chat.'}
+    if reason == 'remote_not_configured':
+        return {'notice': 'Il servizio di trascrizione deve essere configurato dall’amministratore. L’audio originale resta nella chat.'}
+    if reason == 'remote_unavailable':
+        return {'notice': 'Il servizio di trascrizione non è disponibile al momento. Riprova tra poco; l’audio originale resta nella chat.'}
     if reason in ('not_italian', 'not_italian_or_uncertain'):
         return {}
     if reason in ('uncertain_language', 'no_clear_speech'):
@@ -60,6 +66,14 @@ def outcome(result):
 async def transcribe_file(path, on_progress=None):
     if not eligible(Path(path).stat().st_size):
         return {}
+    from remote_voice import provider, transcribe
+    selected = provider()
+    if selected == 'groq':
+        # Direct call bypasses downloader cold starts, its serial media queue,
+        # Whisper CPU work and the separate Java proofreading startup.
+        return outcome(await transcribe(path))
+    if selected != 'local':
+        return outcome({'reason': 'remote_not_configured'})
     base = os.getenv('DOWNLOADER_URL', '').rstrip('/')
     token = os.getenv('DOWNLOADER_TOKEN', '')
     if not base or not token:
@@ -140,7 +154,9 @@ class LiveReply:
         self.message = None
 
     async def start(self):
-        self.message = await self.send('Audio ricevuto. Controllo la lingua e preparo la trascrizione; potrebbe richiedere alcuni minuti. L’audio originale resta nella chat.')
+        from remote_voice import provider
+        wait = ' Potrebbe richiedere alcuni minuti.' if provider() == 'local' else ''
+        self.message = await self.send('Audio ricevuto. Controllo la lingua e preparo la trascrizione.' + wait + ' L’audio originale resta nella chat.')
 
     async def update(self, progress):
         text = progress_text(progress, self.limit)
