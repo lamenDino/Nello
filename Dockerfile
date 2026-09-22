@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
     libxml2-dev libxslt-dev \
-    curl ca-certificates gnupg unzip \
+    curl ca-certificates gnupg unzip bzip2 \
  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
