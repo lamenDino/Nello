@@ -7,6 +7,16 @@ import voice_messages as voice
 
 
 class VoiceFrontendTests(unittest.IsolatedAsyncioTestCase):
+    def test_long_transcript_has_short_paragraphs_without_losing_words_or_times(self):
+        import re
+        text = ('Domani alle 9.30 passa il pulmino e non posso accompagnarla. '
+                'Tu per caso puoi passare alle 10 meno un quarto, poi fammi sapere. ') * 9
+        formatted = voice.readable_paragraphs(text)
+        self.assertGreater(formatted.count('\n\n'), 2)
+        self.assertTrue(all(len(p) <= 380 for p in formatted.split('\n\n')))
+        self.assertEqual(re.sub(r'\s+', ' ', formatted), text.strip())
+        self.assertEqual(voice.readable_paragraphs('Ciao.\n\nCome stai?'), 'Ciao.\n\nCome stai?')
+
     async def test_live_reply_edits_one_bot_message_and_replaces_draft_with_final(self):
         sent = object()
         send, edit = AsyncMock(return_value=sent), AsyncMock()

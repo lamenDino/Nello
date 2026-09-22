@@ -150,7 +150,8 @@ async function handleMessages(sock, upsert) {
         const stream = await downloadMediaMessage(m, 'stream', {}, { logger, reuploadRequest: sock.updateMediaMessage });
         try {
           const live = createVoiceReply(sock, jid, m);
-          const result = await transcribeVoice(BRIDGE, `${jid}:${m.key.id}`, stream, live.update);
+          // WhatsApp gets only the completed result, never progress messages.
+          const result = await transcribeVoice(BRIDGE, `${jid}:${m.key.id}`, stream);
           await live.finish(result);
         } finally { stream.destroy(); }
         // Voice messages stay in the chat; never enter the link deletion branch.

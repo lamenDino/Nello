@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 import json
+import re
 
 import aiohttp
 
@@ -127,9 +128,32 @@ async def transcribe_file(path, on_progress=None):
                 pass
 
 
+def readable_paragraphs(text):
+    """Keep every word; enforce readable paragraphs even if ASR returns a wall of text."""
+    paragraphs = []
+    for original in re.split(r'\n\s*\n', text.strip()):
+        remaining = re.sub(r'\s+', ' ', original).strip()
+        while len(remaining) > 380:
+            # Prefer complete sentences, then clauses. Never split numeric times
+            # or decimals: a break must already be whitespace in the source.
+            spaces = [m.start() for m in re.finditer(r'\s+', remaining) if 150 <= m.start() <= 340]
+            sentences = [i for i in spaces if remaining[i - 1] in '.!?']
+            clauses = [i for i in spaces if remaining[i - 1] in ',;:' or
+                       re.match(r'(?:poi|però|quindi|perché|domani|tu per caso|fammi sapere)\b', remaining[i:].lstrip(), re.I)]
+            candidates = sentences or clauses or spaces
+            if not candidates:
+                break
+            boundary = min(candidates, key=lambda i: abs(i - 250))
+            paragraphs.append(remaining[:boundary])
+            remaining = remaining[boundary:].lstrip()
+        if remaining:
+            paragraphs.append(remaining)
+    return '\n\n'.join(paragraphs)
+
+
 def reply_parts(text, limit=3500):
     from photo_text import split_text
-    return split_text('Trascrizione del vocale:\n\n' + text, limit)
+    return split_text('Trascrizione del vocale:\n\n' + readable_paragraphs(text), limit)
 
 
 def result_parts(result, limit=3500):
